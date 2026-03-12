@@ -95,6 +95,7 @@ def get_solar_forecast(target_date_str=None):
     except Exception:
         target_date = pd.Timestamp.now().strftime('%Y-%m-%d')
 
+    #TODO: This API should be changed
     url = f"https://api.forecast.solar/estimate/{lat}/{lon}/{dec}/{az}/{kwp}"
 
     try:
