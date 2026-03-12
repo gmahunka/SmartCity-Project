@@ -1,0 +1,7 @@
+flask
+flask-Cors
+requests
+python-dotenv
+flake8
+entsoe-py
+pandas
