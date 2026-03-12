@@ -2,107 +2,116 @@
 <html lang="hu">
 <head>
     <meta charset="UTF-8">
-    <title>Áramár Monitor</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <title>Battery Monitor</title>
     <style>
         body { font-family: sans-serif; padding: 20px; background: #eee; }
-        .container { max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 10px; }
+        .container { max-width: 1000px; margin: auto; background: white; padding: 20px; border-radius: 10px; }
+        .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
         .error-msg { color: red; font-weight: bold; margin: 10px 0; display: none; }
         .loading { display: none; color: blue; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin: 16px 0; }
+        .stat-card { border: 1px solid #ddd; border-radius: 8px; padding: 10px; background: #fafafa; }
+        .stat-title { font-size: 12px; color: #666; }
+        .stat-value { font-size: 20px; font-weight: bold; margin-top: 4px; }
+        #plotContainer { margin-top: 16px; }
+        #plotImage { max-width: 100%; border-radius: 8px; border: 1px solid #ddd; }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <h1>Áramár Monitor</h1>
-    
-    <div>
-        Ettől: <input type="date" id="startDate">
-        Eddig: <input type="date" id="endDate">
-        <button onclick="updateChart()">Lekérés</button>
+    <h1>Battery Monitoring</h1>
+
+    <div class="controls">
+        Datum: <input type="date" id="selectedDate">
+        <button onclick="updateDashboard()">Lekeres</button>
     </div>
 
-    <div id="error" class="error-msg">Hiba történt a lekérés során!</div>
-    <div id="loader" class="loading">Adatok betöltése...</div>
+    <div id="error" class="error-msg">Hiba tortent a lekeres soran!</div>
+    <div id="loader" class="loading">Adatok betoltese...</div>
 
-    <canvas id="priceChart" style="margin-top:20px;"></canvas>
+    <div id="statusText"></div>
+    <div id="stats" class="stats"></div>
+
+    <div id="plotContainer">
+        <img id="plotImage" alt="Battery matplotlib diagram">
+    </div>
 </div>
 
 <script>
-    let myChart;
-
-    // Helper function to format dates to YYYY-MM-DD for the input fields
-    const formatDate = (d) => {
-        const year = d.getFullYear();
-        const month = String(d.getMonth() + 1).padStart(2, '0');
-        const day = String(d.getDate()).padStart(2, '0');
+    const formatDate = (date) => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
         return `${year}-${month}-${day}`;
     };
 
-    // Calculate and set default dates (Yesterday to Today)
-    function setDefaultDates() {
+    function setDefaultDate() {
         const today = new Date();
-        const yesterday = new Date(today);
-        yesterday.setDate(yesterday.getDate() - 1);
-
-        document.getElementById('startDate').value = formatDate(yesterday);
-        document.getElementById('endDate').value = formatDate(today);
+        document.getElementById('selectedDate').value = formatDate(today);
     }
 
-    async function updateChart() {
-        const start = document.getElementById('startDate').value;
-        const end = document.getElementById('endDate').value;
+    function getNextDate(dateString) {
+        const date = new Date(dateString);
+        date.setDate(date.getDate() + 1);
+        return formatDate(date);
+    }
+
+    function renderStats(stats) {
+        const statsDiv = document.getElementById('stats');
+        const entries = [
+            ['Koltseg (okos rendszer)', `${stats.smart_cost_huf.toFixed(2)} Ft`],
+            ['Koltseg (akku nelkul)', `${stats.no_battery_cost_huf.toFixed(2)} Ft`],
+            ['Napi megtakaritas', `${stats.saving_huf.toFixed(2)} Ft`],
+            ['EUR/HUF arfolyam (napi)', `${(stats.eur_huf_rate ?? 410).toFixed(2)} HUF/EUR`],
+            ['Atlagar', `${stats.avg_price_huf_kwh.toFixed(2)} Ft/kWh`],
+            ['Napi fogyasztas', `${stats.total_load_kwh.toFixed(2)} kWh`],
+            ['Napi PV termeles', `${stats.total_pv_kwh.toFixed(2)} kWh`]
+        ];
+
+        statsDiv.innerHTML = entries.map(([title, value]) => `
+            <div class="stat-card">
+                <div class="stat-title">${title}</div>
+                <div class="stat-value">${value}</div>
+            </div>
+        `).join('');
+    }
+
+    async function updateDashboard() {
+        const selectedDate = document.getElementById('selectedDate').value;
+        const start = selectedDate;
+        const end = getNextDate(selectedDate);
         const errorDiv = document.getElementById('error');
         const loader = document.getElementById('loader');
+        const statusText = document.getElementById('statusText');
+        const plotImage = document.getElementById('plotImage');
 
         errorDiv.style.display = 'none';
         loader.style.display = 'block';
+        statusText.textContent = '';
 
         try {
-            const url = `http://127.0.0.1:5000/api/prices?start=${start}&end=${end}`;
-            console.log("Calling API:", url);
-
-            const response = await fetch(url);
-            if (!response.ok) throw new Error('Server error');
-            
+            const response = await fetch(`/api/battery-monitor?start=${start}&end=${end}`);
             const data = await response.json();
             loader.style.display = 'none';
 
-            const labels = data.map(e => new Date(e.time).toLocaleString('hu-HU', {
-                year: 'numeric', month: 'short', day: 'numeric', 
-                hour: '2-digit', minute: '2-digit'
-            }));
-            const prices = data.map(e => e.HUF_kWh);
+            if (!response.ok || data.error) {
+                throw new Error(data.error || 'Server error');
+            }
 
-            const ctx = document.getElementById('priceChart').getContext('2d');
-            if (myChart) myChart.destroy();
-
-            myChart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        label: 'Ft / kWh',
-                        data: prices,
-                        borderColor: 'blue',
-                        backgroundColor: 'rgba(0,0,255,0.1)',
-                        fill: true,
-                        pointRadius: 0
-                    }]
-                }
-            });
-        } catch (err) {
+            renderStats(data.stats);
+            plotImage.src = `data:image/png;base64,${data.plot_image_base64}`;
+        } catch (error) {
             loader.style.display = 'none';
             errorDiv.style.display = 'block';
-            errorDiv.innerText = "Error: " + err.message;
-            console.error(err);
+            errorDiv.innerText = `Error: ${error.message}`;
+            console.error(error);
         }
     }
 
-    // Initialize dates and load chart on first load
     window.onload = () => {
-        setDefaultDates();
-        updateChart();
+        setDefaultDate();
+        updateDashboard();
     };
 </script>
 </body>

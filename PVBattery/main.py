@@ -1,94 +1,151 @@
 import pulp
+from datetime import datetime
+from datetime import timedelta
 
-from data_fetcher import get_real_entsoe_prices, get_solar_forecast
-from visualizer import plot_results
+try:
+    from .data_fetcher import get_eur_huf_rates, get_real_entsoe_prices, get_solar_forecast
+    from .visualizer import plot_results, plot_results_base64
+except ImportError:
+    from data_fetcher import get_eur_huf_rates, get_real_entsoe_prices, get_solar_forecast
+    from visualizer import plot_results, plot_results_base64
 
-# --- ADATOK ---
-T = range(24)
-prices_buy = get_real_entsoe_prices()
-# Eladási ár: tegyük fel, hogy a piaci ár 90%-a
-prices_sell = [p * 0.9 for p in prices_buy] 
 
-pv_gen = pv_gen = get_solar_forecast()
-# A fogyasztói profil még ideiglenes
-load = [0.4, 0.3, 0.3, 0.3, 0.4, 0.8, 1.5, 2.0, 1.2, 0.8, 0.7, 0.7, 0.8, 0.7, 0.7, 0.8, 1.2, 2.5, 3.0, 2.8, 1.5, 1.0, 0.6, 0.5]
+def run_battery_monitoring(start_date_str=None, end_date_str=None):
+    if start_date_str is None:
+        start_date_str = datetime.now().strftime('%Y-%m-%d')
 
-# --- MODELL ---
-model = pulp.LpProblem("Energy_Optimization", pulp.LpMinimize)
+    try:
+        start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+    except ValueError:
+        start_date = datetime.now().date()
+        start_date_str = start_date.strftime('%Y-%m-%d')
 
-# --- VÁLTOZÓK ---
-p_chg = pulp.LpVariable.dicts("P_chg", T, lowBound=0, upBound=5)      # Max 5kW töltés
-p_dis = pulp.LpVariable.dicts("P_dis", T, lowBound=0, upBound=5)      # Max 5kW kisütés
-p_grid_buy = pulp.LpVariable.dicts("P_buy", T, lowBound=0)
-p_grid_sell = pulp.LpVariable.dicts("P_sell", T, lowBound=0)
-soc = pulp.LpVariable.dicts("SOC", T, lowBound=2, upBound=10)        # 2kWh min, 10kWh max
-
-# --- PARAMÉTEREK ---
-eff = 0.95 
-initial_soc = 5 # Kezdjünk 5 kWh-val
-c_deg = 2 # Akku kopási költség (Ft/kWh)
-
-# --- CÉLFÜGGVÉNY (Költség minimalizálás) ---
-# Költség = (Vétel * Ár) - (Eladás * Ár) + (Akku használat * Kopás)
-model += pulp.lpSum([
-    p_grid_buy[t] * prices_buy[t] - 
-    p_grid_sell[t] * prices_sell[t] + 
-    (p_chg[t] + p_dis[t]) * c_deg 
-    for t in T
-])
-
-# --- KORLÁTOK ---
-for t in T:
-    # 1. Energia-egyensúly: Ami bejön, annak el kell mennie
-    # PV + AkkuKisütés + HálózatiVétel = Fogyasztás + AkkuTöltés + HálózatiEladás
-    model += (pv_gen[t] + p_dis[t] + p_grid_buy[t] == load[t] + p_chg[t] + p_grid_sell[t])
-    
-    # 2. SOC (Töltöttség) kiszámítása
-    if t == 0:
-        model += soc[t] == initial_soc + (p_chg[t] * eff) - (p_dis[t] / eff)
+    if end_date_str is None:
+        end_date = start_date + timedelta(days=1)
+        end_date_str = end_date.strftime('%Y-%m-%d')
     else:
-        model += soc[t] == soc[t-1] + (p_chg[t] * eff) - (p_dis[t] / eff)
+        try:
+            end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+        except ValueError:
+            end_date = start_date + timedelta(days=1)
+            end_date_str = end_date.strftime('%Y-%m-%d')
 
-# --- MEGOLDÁS ---
-model.solve(pulp.PULP_CBC_CMD(msg=0)) # msg=0 kikapcsolja a solver naplózást
+    if end_date <= start_date:
+        end_date = start_date + timedelta(days=1)
+        end_date_str = end_date.strftime('%Y-%m-%d')
 
-# --- EREDMÉNYEK ---
-print(f"Státusz: {pulp.LpStatus[model.status]}")
-print(f"{'Óra':<5} | {'Ár':<5} | {'PV':<5} | {'Load':<5} | {'Akku':<8} | {'SOC':<5} | {'Grid'}")
-print("-" * 60)
-for t in T:
-    net_battery = p_chg[t].varValue - p_dis[t].varValue
-    net_grid = p_grid_buy[t].varValue - p_grid_sell[t].varValue
-    print(f"{t:<5} | {prices_buy[t]:<5} | {pv_gen[t]:<5} | {load[t]:<5} | {net_battery:>7.2f} | {soc[t].varValue:>5.2f} | {net_grid:>5.2f}")
+    T = range(24)
+    prices_buy = get_real_entsoe_prices(start_date_str, end_date_str)
+    prices_sell = [p * 0.9 for p in prices_buy]
+    eur_huf_rate = 410.0
 
-# --- PÉNZÜGYI ÖSSZESÍTÉS ---
-total_cost_with_smart_system = pulp.value(model.objective)
+    try:
+        rates_series = get_eur_huf_rates(start_date_str, end_date_str)
+        if not rates_series.empty:
+            if start_date_str in rates_series.index:
+                eur_huf_rate = float(rates_series[start_date_str])
+            else:
+                eur_huf_rate = float(rates_series.iloc[-1])
+    except Exception:
+        pass
 
-# Mi lett volna az akkumulátor nélkül?
-# Ekkor a ház vagy a PV-t használja, vagy a hálózatot (vétel/eladás)
-cost_without_battery = 0
-for t in T:
-    net_flow = load[t] - pv_gen[t]
-    if net_flow > 0: # Venni kell a hálózatból
-        cost_without_battery += net_flow * prices_buy[t]
-    else: # Eladjuk a felesleget
-        cost_without_battery += net_flow * prices_buy[t] * 0.9 # 0.9 az eladási szorzó
+    pv_gen = get_solar_forecast(start_date_str)
+    load = [
+        0.4, 0.3, 0.3, 0.3, 0.4, 0.8, 1.5, 2.0, 1.2, 0.8, 0.7, 0.7,
+        0.8, 0.7, 0.7, 0.8, 1.2, 2.5, 3.0, 2.8, 1.5, 1.0, 0.6, 0.5
+    ]
 
-saving = cost_without_battery - total_cost_with_smart_system
+    model = pulp.LpProblem("Energy_Optimization", pulp.LpMinimize)
 
-print("\n" + "="*30)
-print(f"Napi mérleg összesítve:")
-print(f"Költség okos rendszerrel:  {total_cost_with_smart_system:>8.2f} Ft")
-print(f"Költség akkumulátor nélkül: {cost_without_battery:>8.2f} Ft")
-print("-" * 30)
-print(f"Napi megtakarítás:         {saving:>8.2f} Ft")
-print("="*30)
+    p_chg = pulp.LpVariable.dicts("P_chg", T, lowBound=0, upBound=5)
+    p_dis = pulp.LpVariable.dicts("P_dis", T, lowBound=0, upBound=5)
+    p_grid_buy = pulp.LpVariable.dicts("P_buy", T, lowBound=0)
+    p_grid_sell = pulp.LpVariable.dicts("P_sell", T, lowBound=0)
+    soc = pulp.LpVariable.dicts("SOC", T, lowBound=2, upBound=10)
 
-# --- EREDMÉNYEK ÖSSZEGYŰJTÉSE ---
-# Kiolvassuk a PuLP változókból a számokat listákba
-soc_list = [soc[t].varValue for t in T]
-battery_list = [p_chg[t].varValue - p_dis[t].varValue for t in T]
-grid_list = [p_grid_buy[t].varValue - p_grid_sell[t].varValue for t in T]
+    eff = 0.95
+    initial_soc = 5
+    c_deg = 2
 
-# --- VIZUALIZÁCIÓ MEGHÍVÁSA ---
-plot_results(T, prices_buy, pv_gen, load, soc_list, battery_list, grid_list)
+    model += pulp.lpSum([
+        p_grid_buy[t] * prices_buy[t] -
+        p_grid_sell[t] * prices_sell[t] +
+        (p_chg[t] + p_dis[t]) * c_deg
+        for t in T
+    ])
+
+    for t in T:
+        model += (pv_gen[t] + p_dis[t] + p_grid_buy[t] == load[t] + p_chg[t] + p_grid_sell[t])
+        if t == 0:
+            model += soc[t] == initial_soc + (p_chg[t] * eff) - (p_dis[t] / eff)
+        else:
+            model += soc[t] == soc[t - 1] + (p_chg[t] * eff) - (p_dis[t] / eff)
+
+    model.solve(pulp.PULP_CBC_CMD(msg=0))
+
+    soc_list = [float(soc[t].varValue or 0.0) for t in T]
+    battery_list = [float((p_chg[t].varValue or 0.0) - (p_dis[t].varValue or 0.0)) for t in T]
+    grid_list = [float((p_grid_buy[t].varValue or 0.0) - (p_grid_sell[t].varValue or 0.0)) for t in T]
+
+    total_cost_with_smart_system = float(pulp.value(model.objective) or 0.0)
+    cost_without_battery = 0.0
+    for t in T:
+        net_flow = load[t] - pv_gen[t]
+        if net_flow > 0:
+            cost_without_battery += net_flow * prices_buy[t]
+        else:
+            cost_without_battery += net_flow * prices_buy[t] * 0.9
+
+    saving = cost_without_battery - total_cost_with_smart_system
+
+    plot_b64 = plot_results_base64(T, prices_buy, pv_gen, load, soc_list, battery_list, grid_list)
+    hourly = [
+        {
+            'hour': t,
+            'price_huf_kwh': round(prices_buy[t], 3),
+            'pv_kw': round(pv_gen[t], 3),
+            'load_kw': round(load[t], 3),
+            'battery_kw': round(battery_list[t], 3),
+            'soc_kwh': round(soc_list[t], 3),
+            'grid_kw': round(grid_list[t], 3),
+        }
+        for t in T
+    ]
+
+    return {
+        'status': pulp.LpStatus[model.status],
+        'start_date': start_date_str,
+        'end_date': end_date_str,
+        'plot_image_base64': plot_b64,
+        'stats': {
+            'smart_cost_huf': float(round(total_cost_with_smart_system, 2)),
+            'no_battery_cost_huf': float(round(cost_without_battery, 2)),
+            'saving_huf': float(round(saving, 2)),
+            'eur_huf_rate': float(round(eur_huf_rate, 2)),
+            'avg_price_huf_kwh': float(round(sum(prices_buy) / len(prices_buy), 2)),
+            'total_load_kwh': float(round(sum(load), 2)),
+            'total_pv_kwh': float(round(sum(pv_gen), 2)),
+        },
+        'hourly': hourly,
+    }
+
+
+if __name__ == '__main__':
+    result = run_battery_monitoring()
+    print(f"Státusz: {result['status']}")
+    print("=" * 30)
+    print("Napi mérleg összesítve:")
+    print(f"Költség okos rendszerrel:   {result['stats']['smart_cost_huf']:>8.2f} Ft")
+    print(f"Költség akkumulátor nélkül: {result['stats']['no_battery_cost_huf']:>8.2f} Ft")
+    print("-" * 30)
+    print(f"Napi megtakarítás:          {result['stats']['saving_huf']:>8.2f} Ft")
+    print("=" * 30)
+
+    T = range(24)
+    prices = [item['price_huf_kwh'] for item in result['hourly']]
+    pv = [item['pv_kw'] for item in result['hourly']]
+    load = [item['load_kw'] for item in result['hourly']]
+    soc_values = [item['soc_kwh'] for item in result['hourly']]
+    battery = [item['battery_kw'] for item in result['hourly']]
+    grid = [item['grid_kw'] for item in result['hourly']]
+    plot_results(T, prices, pv, load, soc_values, battery, grid)
