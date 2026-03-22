@@ -39,6 +39,15 @@
 </div>
 
 <script>
+    const API_BASE_URL = (window.API_BASE_URL || '').replace(/\/$/, '');
+
+    const apiUrl = (path) => {
+        if (!API_BASE_URL) {
+            return path;
+        }
+        return `${API_BASE_URL}${path}`;
+    };
+
     const formatDate = (date) => {
         const year = date.getFullYear();
         const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -46,9 +55,30 @@
         return `${year}-${month}-${day}`;
     };
 
-    function setDefaultDate() {
-        const today = new Date();
-        document.getElementById('selectedDate').value = formatDate(today);
+    function getYesterdayDateString() {
+        const now = new Date();
+        now.setDate(now.getDate() - 1);
+        return formatDate(now);
+    }
+
+    async function setDefaultDate() {
+        const dateInput = document.getElementById('selectedDate');
+
+        try {
+            const response = await fetch(apiUrl('/api/available-dates'));
+            if (!response.ok) {
+                throw new Error('Failed to load available dates');
+            }
+            const availableDates = await response.json();
+            if (Array.isArray(availableDates) && availableDates.length > 0) {
+                dateInput.value = availableDates[availableDates.length - 1];
+                return;
+            }
+        } catch (error) {
+            console.warn('Could not fetch available dates, falling back to yesterday.', error);
+        }
+
+        dateInput.value = getYesterdayDateString();
     }
 
     function getNextDate(dateString) {
@@ -91,7 +121,7 @@
         statusText.textContent = '';
 
         try {
-            const response = await fetch(`/api/battery-monitor?start=${start}&end=${end}`);
+            const response = await fetch(apiUrl(`/api/battery-monitor?start=${start}&end=${end}`));
             const data = await response.json();
             loader.style.display = 'none';
 
@@ -101,6 +131,7 @@
 
             renderStats(data.stats);
             plotImage.src = `data:image/png;base64,${data.plot_image_base64}`;
+            statusText.textContent = `Forras: ${data.source || 'unknown'} | Datum: ${start}`;
         } catch (error) {
             loader.style.display = 'none';
             errorDiv.style.display = 'block';
@@ -109,8 +140,8 @@
         }
     }
 
-    window.onload = () => {
-        setDefaultDate();
+    window.onload = async () => {
+        await setDefaultDate();
         updateDashboard();
     };
 </script>

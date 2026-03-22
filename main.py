@@ -1,5 +1,7 @@
+import json
 import os
 from datetime import datetime
+from functools import wraps
 
 import pandas as pd
 import requests
@@ -10,7 +12,6 @@ from flask_cors import CORS
 
 from PVBattery.main import run_battery_monitoring
 
-
 load_dotenv()
 
 app = Flask(__name__)
@@ -19,6 +20,8 @@ CORS(app)
 API_KEY = os.environ.get("ENTSOE_API_KEY")
 COUNTRY_CODE = "10YHU-MAVIR----U"
 DEFAULT_HUF_RATE = 410.0
+
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 if not API_KEY:
     raise RuntimeError("ENTSOE_API_KEY environment variable is required")
@@ -30,7 +33,6 @@ def get_eur_huf_rates(start_date_str, end_date_str):
         start_fetch = start_dt.strftime('%Y-%m-%d')
         url = f"https://api.frankfurter.app/{start_fetch}..{end_date_str}?from=EUR&to=HUF"
         response = requests.get(url, timeout=5)
-
         if response.status_code == 200:
             data = response.json()
             rates = {date: values['HUF'] for date, values in data.get('rates', {}).items()}
@@ -49,60 +51,66 @@ def get_requested_dates():
     return start_str, end_str
 
 
+def load_stored_data(date_str):
+    """Load cached battery monitoring result for a given date."""
+    data_file = os.path.join(DATA_DIR, f"{date_str}.json")
+    if os.path.exists(data_file):
+        with open(data_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def list_available_dates():
+    if not os.path.isdir(DATA_DIR):
+        return []
+    return sorted(
+        os.path.splitext(filename)[0]
+        for filename in os.listdir(DATA_DIR)
+        if filename.endswith('.json')
+    )
+
+
+def is_live_call_allowed():
+    allow_live = request.args.get('allow_live', 'false').strip().lower()
+    return allow_live in {'1', 'true', 'yes', 'on'}
+
+
 @app.route('/')
 def index():
     return send_file('index.html')
-
-
-@app.route('/api/prices')
-def get_prices():
-    start_str, end_str = get_requested_dates()
-
-    try:
-        client = EntsoePandasClient(api_key=API_KEY)
-        start = pd.Timestamp(start_str, tz='Europe/Budapest')
-        end = pd.Timestamp(end_str, tz='Europe/Budapest') + pd.Timedelta(days=1)
-        prices_series = client.query_day_ahead_prices(COUNTRY_CODE, start=start, end=end)
-
-        if prices_series.empty:
-            return jsonify({"error": "No price data available for the selected period."}), 404
-
-        prices_df = pd.DataFrame(prices_series, columns=['EUR_MWh'])
-        rates_series = get_eur_huf_rates(start_str, end_str)
-        rates_series.index = pd.to_datetime(rates_series.index)
-        full_dates = pd.date_range(start=start_str, end=end_str, freq='D')
-
-        if rates_series.empty:
-            rates_df = pd.DataFrame({'HUF': DEFAULT_HUF_RATE}, index=full_dates)
-        else:
-            rates_df = pd.DataFrame(
-                index=pd.date_range(start=rates_series.index.min(), end=end_str, freq='D')
-            )
-            rates_df['HUF'] = rates_series
-            rates_df['HUF'] = rates_df['HUF'].ffill().bfill()
-            rates_df = rates_df.reindex(full_dates)
-            rates_df['HUF'] = rates_df['HUF'].fillna(DEFAULT_HUF_RATE)
-
-        prices_df['date'] = prices_df.index.tz_convert('Europe/Budapest').normalize().tz_localize(None)
-        prices_df['HUF_kWh'] = (prices_df['EUR_MWh'] * prices_df['date'].map(rates_df['HUF'])) / 1000
-
-        result = prices_df.reset_index()[['index', 'EUR_MWh', 'HUF_kWh']]
-        result.columns = ['time', 'EUR_MWh', 'HUF_kWh']
-        result['time'] = result['time'].dt.strftime('%Y-%m-%dT%H:%M:%S%z')
-
-        return jsonify(result.to_dict(orient='records'))
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
-
 
 @app.route('/api/battery-monitor')
 def get_battery_monitor():
     start_str, end_str = get_requested_dates()
 
+    # Prefer stored data if available
+    stored = load_stored_data(start_str)
+    if stored:
+        stored["source"] = "cached"
+        return jsonify(stored)
+
+    # Live API call is explicit opt-in to protect API quota
+    if not is_live_call_allowed():
+        return jsonify({
+            "error": "No cached data available for the selected date.",
+            "source": "none",
+            "selected_date": start_str,
+            "available_dates": list_available_dates(),
+            "hint": "Run daily fetcher or call with allow_live=true to compute live data."
+        }), 404
+
     try:
-        return jsonify(run_battery_monitoring(start_str, end_str))
+        result = run_battery_monitoring(start_str, end_str)
+        result["source"] = "live"
+        return jsonify(result)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
+
+
+@app.route('/api/available-dates')
+def get_available_dates():
+    """Return list of dates that have stored data."""
+    return jsonify(list_available_dates())
 
 
 if __name__ == '__main__':
