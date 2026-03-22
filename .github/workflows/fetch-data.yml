@@ -2,18 +2,22 @@ name: Fetch SmartCity Data (Daily)
 
 on:
   schedule:
-    # Run once a day at 06:00 UTC (~7AM Budapest)
     - cron: "0 6 * * *"
   workflow_dispatch:
-    # Allow manual trigger from GitHub UI
+
+permissions:
+  contents: write
 
 jobs:
   fetch:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout target branch
         uses: actions/checkout@v4
+        with:
+          ref: mahu/cicd
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -21,8 +25,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Fetch yesterday's data
         run: python fetcher.py
@@ -35,4 +38,4 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git add data/
           git diff --staged --quiet || git commit -m "data: $(date +%Y-%m-%d) daily fetch"
-          git push
+          git push origin HEAD:mahu/cicd
