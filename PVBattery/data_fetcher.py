@@ -11,15 +11,14 @@ COUNTRY_CODE = "10YHU-MAVIR----U"
 
 def get_eur_huf_rates(start_date_str, end_date_str):
     try:
-        start_dt = pd.to_datetime(start_date_str) - pd.Timedelta(days=7)
-        start_fetch = start_dt.strftime('%Y-%m-%d')
-
-        url = f"https://api.frankfurter.app/{start_fetch}..{end_date_str}?from=EUR&to=HUF"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            rates = {date: values['HUF'] for date, values in data.get('rates', {}).items()}
-            return pd.Series(rates)
+        url = "https://api.frankfurter.app/latest?from=EUR&to=HUF"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        rate = data.get('rates', {}).get('HUF')
+        date = data.get('date')
+        if rate and date:
+            return pd.Series({date: rate})
     except Exception as exc:
         print(f"Warning: Failed to fetch exchange rates: {exc}")
 
