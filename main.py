@@ -26,23 +26,6 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 if not API_KEY:
     raise RuntimeError("ENTSOE_API_KEY environment variable is required")
 
-
-def get_eur_huf_rates(start_date_str, end_date_str):
-    try:
-        start_dt = pd.to_datetime(start_date_str) - pd.Timedelta(days=7)
-        start_fetch = start_dt.strftime('%Y-%m-%d')
-        url = f"https://api.frankfurter.app/{start_fetch}..{end_date_str}?from=EUR&to=HUF"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            rates = {date: values['HUF'] for date, values in data.get('rates', {}).items()}
-            return pd.Series(rates)
-    except Exception as exc:
-        print(f"Warning: Failed to fetch exchange rates: {exc}")
-
-    return pd.Series(dtype=float)
-
-
 def get_requested_dates():
     today = datetime.now().date()
     tomorrow = today + pd.Timedelta(days=1)
