@@ -4,6 +4,12 @@ import pandas as pd
 from entsoe import EntsoePandasClient
 from dotenv import load_dotenv
 
+import pvlib
+from pvlib.pvsystem import PVSystem
+from pvlib.location import Location
+from pvlib.modelchain import ModelChain
+from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
+
 load_dotenv()
 API_TOKEN = os.environ.get("ENTSOE_API_KEY")
 COUNTRY_CODE = "10YHU-MAVIR----U"
@@ -81,65 +87,77 @@ def get_real_entsoe_prices(start_date_str=None, end_date_str=None):
         return [30] * 24
 
 def get_solar_forecast(target_date_str=None):
+    # 1. Rendszer paraméterek (Budapest)
     lat = 47.50
     lon = 19.04
-    dec = 35
-    az = 0
-    kwp = 5
+    tilt = 35
+    # FIGYELEM: A pvlib-ben az Észak = 0, Kelet = 90, Dél = 180. 
+    # A korábbi API-nál a 0 jelentette a Délt, itt át kell írni 180-ra!
+    azimuth = 180 
+    kwp = 5.0
 
     if target_date_str is None:
-        target_date_str = pd.Timestamp.now().strftime('%Y-%m-%d')
+        target_date_str = pd.Timestamp.now(tz='Europe/Budapest').strftime('%Y-%m-%d')
 
-    try:
-        target_date = pd.to_datetime(target_date_str).strftime('%Y-%m-%d')
-    except Exception:
-        target_date = pd.Timestamp.now().strftime('%Y-%m-%d')
-
-    url = f"https://api.forecast.solar/estimate/{lat}/{lon}/{dec}/{az}/{kwp}"
+    # 2. Open-Meteo API lekérés az adott napra
+    # Lekérjük a hőmérsékletet, szelet, és a 3 legfontosabb sugárzási adatot (GHI, DNI, DHI)
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={lat}&longitude={lon}&"
+        f"hourly=temperature_2m,wind_speed_10m,shortwave_radiation,direct_normal_irradiance,diffuse_radiation&"
+        f"timezone=Europe%2FBudapest&"
+        f"start_date={target_date_str}&end_date={target_date_str}"
+    )
 
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
 
-        result = data.get('result', {}) if isinstance(data, dict) else {}
-        watt_hours = result.get('watts', {}) if isinstance(result, dict) else {}
-        if not isinstance(watt_hours, dict):
-            raise ValueError("A Forecast.Solar válaszban a 'result.watts' nem szótár.")
+        # 3. Adatok DataFrame-be rendezése a pvlib számára
+        times = pd.to_datetime(data['hourly']['time']).tz_localize('Europe/Budapest')
+        weather_df = pd.DataFrame({
+            'ghi': data['hourly']['shortwave_radiation'],          # Globális vízszintes besugárzás
+            'dni': data['hourly']['direct_normal_irradiance'],     # Direkt normál besugárzás
+            'dhi': data['hourly']['diffuse_radiation'],            # Diffúz besugárzás
+            'temp_air': data['hourly']['temperature_2m'],
+            'wind_speed': data['hourly']['wind_speed_10m']
+        }, index=times)
 
-        daily_values = {}
-        for timestamp, watt in watt_hours.items():
-            if not isinstance(timestamp, str):
-                continue
-            date_key = timestamp[:10]
-            hour_part = timestamp[11:13]
-            if len(hour_part) != 2 or not hour_part.isdigit():
-                continue
-            hour = int(hour_part)
-            if not 0 <= hour <= 23:
-                continue
+        # 4. PVLIB Rendszer és Helyszín definíció (PVWatts modell alapján)
+        site_location = Location(lat, lon, tz='Europe/Budapest')
+        
+        system = PVSystem(
+            surface_tilt=tilt,
+            surface_azimuth=azimuth,
+            # pdc0: DC kapacitás Wattban, gamma_pdc: hőmérsékleti együttható (%/°C)
+            module_parameters={'pdc0': kwp * 1000, 'gamma_pdc': -0.004},
+            # Egyszerű inverter definíció 96%-os hatásfokkal
+            inverter_parameters={'pdc0': kwp * 1000 * 1.1, 'eta_inv_nom': 0.96},
+            temperature_model_parameters=TEMPERATURE_MODEL_PARAMETERS['sapm']['open_rack_glass_glass']
+        )
+        
+        # Futtatókörnyezet (ModelChain) összeállítása
+        mc = ModelChain(system, site_location, aoi_model='physical', spectral_model='no_loss')
 
-            if date_key not in daily_values:
-                daily_values[date_key] = [0.0] * 24
+        # 5. Szimuláció futtatása az időjárási adatokon
+        mc.run_model(weather_df)
 
-            try:
-                daily_values[date_key][hour] = round(float(watt) / 1000, 2)
-            except (TypeError, ValueError):
-                daily_values[date_key][hour] = 0.0
+        # 6. Eredmények kinyerése (AC teljesítmény Wattból átváltva kW-ba)
+        ac_power_kw = mc.results.ac / 1000.0
+        
+        # Éjszaka a pvlib minimális negatív értékeket (inverter fogyasztás) adhat, ezt nullázzuk
+        ac_power_kw = ac_power_kw.clip(lower=0)
 
-        if target_date in daily_values:
-            return daily_values[target_date]
+        # 24 órás listává alakítás
+        daily_values = [round(float(val), 2) for val in ac_power_kw.values]
 
-        if daily_values:
-            closest_date = sorted(daily_values.keys())[0]
-            print(
-                f"Figyelem: nincs PV előrejelzés erre a napra ({target_date}), "
-                f"használt nap: {closest_date}"
-            )
-            return daily_values[closest_date]
+        # Biztonsági ellenőrzés, ha valamiért nem 24 órát adna vissza az API
+        if len(daily_values) < 24:
+            daily_values.extend([0.0] * (24 - len(daily_values)))
 
-        return [0.0] * 24
+        return daily_values[:24]
 
     except Exception as e:
-        print(f"Hiba a napelem becslésnél: {e}")
+        print(f"Hiba az Open-Meteo / PVLIB számításnál: {e}")
         return [0.0] * 24
