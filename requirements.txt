@@ -7,3 +7,4 @@ entsoe-py
 pandas
 pulp
 matplotlib
+pvlib
