@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 import pandas as pd
 from entsoe import EntsoePandasClient
@@ -16,17 +17,30 @@ COUNTRY_CODE = "10YHU-MAVIR----U"
 
 
 def get_eur_huf_rates(start_date_str, end_date_str):
-    try:
-        url = "https://api.frankfurter.app/latest?from=EUR&to=HUF"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        rate = data.get('rates', {}).get('HUF')
-        date = data.get('date')
-        if rate and date:
-            return pd.Series({date: rate})
-    except Exception as exc:
-        print(f"Warning: Failed to fetch exchange rates: {exc}")
+    url = "https://api.frankfurter.app/latest?from=EUR&to=HUF"
+    retry_delays = [0, 1, 2]
+    last_error = None
+
+    for delay in retry_delays:
+        if delay:
+            time.sleep(delay)
+
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            rate = data.get('rates', {}).get('HUF')
+            date = data.get('date')
+
+            if rate is not None and date:
+                return pd.Series({date: rate})
+
+            last_error = "Missing 'HUF' rate or 'date' in response"
+        except Exception as exc:
+            last_error = exc
+            print(f"Attempt failed: {exc}")
+
+    print(f"Warning: Failed to fetch exchange rates after retries: {last_error}")
 
     return pd.Series(dtype=float)
 
