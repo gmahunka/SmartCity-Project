@@ -22,7 +22,7 @@ ARCHIVE_DIR = DATA_DIR / "archive"
 
 def fetch_and_save(target_date_str=None):
     if target_date_str is None:
-        target_date_str = datetime.now().strftime('%Y-%m-%d')
+        target_date_str = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
 
     print(f"Fetching data for: {target_date_str}")
 
