@@ -1,6 +1,8 @@
 import pulp
+import json
 from datetime import datetime
 from datetime import timedelta
+from pathlib import Path
 
 try:
     from .data_fetcher import get_eur_huf_rates, get_real_entsoe_prices, get_solar_forecast
@@ -8,6 +10,27 @@ try:
 except ImportError:
     from data_fetcher import get_eur_huf_rates, get_real_entsoe_prices, get_solar_forecast
     from visualizer import plot_results, plot_results_base64
+
+
+def get_last_soc_from_previous_day(start_date_str):
+    """Fetch the last SOC from the previous day's data file."""
+    try:
+        prev_date = datetime.strptime(start_date_str, '%Y-%m-%d') - timedelta(days=1)
+        prev_date_str = prev_date.strftime('%Y-%m-%d')
+        data_dir = Path(__file__).parent.parent / "data"
+        prev_file = data_dir / f"{prev_date_str}.json"
+        if prev_file.exists():
+            with open(prev_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if 'hourly' in data and len(data['hourly']) > 0:
+                last_entry = data['hourly'][-1]
+                soc = last_entry.get('soc_kwh')
+                if soc is not None:
+                    print(f"Using initial SOC {soc} from {prev_date_str} (last SOC of the day)")
+                    return float(soc)
+    except Exception as e:
+        print(f"Warning: Could not fetch previous SOC: {e}")
+    return None
 
 
 def run_battery_monitoring(start_date_str=None, end_date_str=None):
@@ -64,7 +87,10 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
     soc = pulp.LpVariable.dicts("SOC", T, lowBound=2, upBound=10)
 
     eff = 0.95
-    initial_soc = 5
+    initial_soc = get_last_soc_from_previous_day(start_date_str)
+    if initial_soc is None:
+        initial_soc = 5
+        print("No previous SOC found, defaulting to 5")
     c_deg = 2
 
     model += pulp.lpSum([
