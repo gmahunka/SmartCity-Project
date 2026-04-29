@@ -57,8 +57,11 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
         end_date = start_date + timedelta(days=1)
         end_date_str = end_date.strftime('%Y-%m-%d')
 
+    RHD_DIJ = 25
+
     T = range(24)
-    prices_buy = get_real_entsoe_prices(start_date_str, end_date_str)
+    prices = get_real_entsoe_prices(start_date_str, end_date_str)
+    prices_buy = [p + RHD_DIJ for p in prices]
     prices_sell = [p * 0.9 for p in prices_buy]
     eur_huf_rate = 410.0
 
@@ -73,11 +76,10 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
         pass
 
     pv_gen = get_solar_forecast(start_date_str)
-    load = [
-        0.4, 0.3, 0.3, 0.3, 0.4, 0.8, 1.5, 2.0, 1.2, 0.8, 0.7, 0.7,
-        0.8, 0.7, 0.7, 0.8, 1.2, 2.5, 3.0, 2.8, 1.5, 1.0, 0.6, 0.5
-    ]
+    load = [ 0.5, 0.4, 0.4, 0.4, 0.5, 1.2, 2.5, 3.0, 2.8, 2.5, 2.2, 
+            2.0, 2.2, 2.1, 2.0, 2.2, 2.8, 3.5, 4.0, 3.5, 2.0, 1.2, 0.8, 0.6 ]
 
+    
     model = pulp.LpProblem("Energy_Optimization", pulp.LpMinimize)
 
     p_chg = pulp.LpVariable.dicts("P_chg", T, lowBound=0, upBound=5)
@@ -91,14 +93,16 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
     if initial_soc is None:
         initial_soc = 5
         print("No previous SOC found, defaulting to 5")
-    c_deg = 2
+
+    c_deg = 1
+
+    future_value_estimate = (sum(prices_buy) / len(prices_buy))
 
     model += pulp.lpSum([
         p_grid_buy[t] * prices_buy[t] -
         p_grid_sell[t] * prices_sell[t] +
         (p_chg[t] + p_dis[t]) * c_deg
-        for t in T
-    ])
+        for t in T] - (soc[23] * future_value_estimate))
 
     for t in T:
         model += (pv_gen[t] + p_dis[t] + p_grid_buy[t] == load[t] + p_chg[t] + p_grid_sell[t])
@@ -113,16 +117,19 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
     battery_list = [float((p_chg[t].varValue or 0.0) - (p_dis[t].varValue or 0.0)) for t in T]
     grid_list = [float((p_grid_buy[t].varValue or 0.0) - (p_grid_sell[t].varValue or 0.0)) for t in T]
 
-    total_cost_with_smart_system = float(pulp.value(model.objective) or 0.0)
+    total_cost_with_smart_system = float((pulp.value(model.objective) + (pulp.value(soc[23]) * future_value_estimate)) or 0.0)
     cost_without_battery = 0.0
     for t in T:
         net_flow = load[t] - pv_gen[t]
         if net_flow > 0:
-            cost_without_battery += net_flow * prices_buy[t]
+            cost_without_battery += net_flow * (prices[t] + RHD_DIJ)
         else:
-            cost_without_battery += net_flow * prices_buy[t] * 0.9
+            cost_without_battery += net_flow * (prices[t] * 0.9)
 
     saving = cost_without_battery - total_cost_with_smart_system
+    pure_grid_cost = sum(load[t] * (prices_buy[t]) for t in T)
+    total_saving_vs_grid = pure_grid_cost - total_cost_with_smart_system
+
 
     plot_b64 = plot_results_base64(T, prices_buy, pv_gen, load, soc_list, battery_list, grid_list)
     hourly = [
@@ -146,6 +153,8 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
         'stats': {
             'smart_cost_huf': float(round(total_cost_with_smart_system, 2)),
             'no_battery_cost_huf': float(round(cost_without_battery, 2)),
+            'pure_grid_cost_huf': float(round(pure_grid_cost, 2)),
+            'total_saving_vs_grid_huf': float(round(total_saving_vs_grid, 2)),
             'saving_huf': float(round(saving, 2)),
             'eur_huf_rate': float(round(eur_huf_rate, 2)),
             'avg_price_huf_kwh': float(round(sum(prices_buy) / len(prices_buy), 2)),
@@ -158,14 +167,6 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
 
 if __name__ == '__main__':
     result = run_battery_monitoring()
-    print(f"Státusz: {result['status']}")
-    print("=" * 30)
-    print("Napi mérleg összesítve:")
-    print(f"Költség okos rendszerrel:   {result['stats']['smart_cost_huf']:>8.2f} Ft")
-    print(f"Költség akkumulátor nélkül: {result['stats']['no_battery_cost_huf']:>8.2f} Ft")
-    print("-" * 30)
-    print(f"Napi megtakarítás:          {result['stats']['saving_huf']:>8.2f} Ft")
-    print("=" * 30)
 
     T = range(24)
     prices = [item['price_huf_kwh'] for item in result['hourly']]

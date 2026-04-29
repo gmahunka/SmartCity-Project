@@ -24,6 +24,9 @@
 
     <div class="controls">
         Datum: <input type="date" id="selectedDate">
+        <label>
+            <input type="checkbox" id="forceRefresh"> Live
+        </label>
         <button onclick="updateDashboard()">Lekeres</button>
     </div>
 
@@ -89,14 +92,28 @@
 
     function renderStats(stats) {
         const statsDiv = document.getElementById('stats');
+        if (!stats) {
+            statsDiv.innerHTML = "Nincs elérhető adat.";
+            return;
+        }
+
+    
+        const f = (val, unit = " Ft") => {
+            if (val === undefined || val === null || isNaN(val)) {
+                return "N/A";
+            }
+            return val.toFixed(2) + " " + unit;
+        };
+
         const entries = [
-            ['Koltseg (okos rendszer)', `${stats.smart_cost_huf.toFixed(2)} Ft`],
-            ['Koltseg (akku nelkul)', `${stats.no_battery_cost_huf.toFixed(2)} Ft`],
-            ['Napi megtakaritas', `${stats.saving_huf.toFixed(2)} Ft`],
-            ['EUR/HUF arfolyam (napi)', `${(stats.eur_huf_rate ?? 410).toFixed(2)} HUF/EUR`],
-            ['Atlagar', `${stats.avg_price_huf_kwh.toFixed(2)} Ft/kWh`],
-            ['Napi fogyasztas', `${stats.total_load_kwh.toFixed(2)} kWh`],
-            ['Napi PV termeles', `${stats.total_pv_kwh.toFixed(2)} kWh`]
+            ['Költség (Csak hálózat)', f(stats.pure_grid_cost_huf)],
+            ['Költség (Akku nélkül)', f(stats.no_battery_cost_huf)],
+            ['Költség (Okos rendszer)', f(stats.smart_cost_huf)],
+            ['Összes megtakarítás', f(stats.total_saving_vs_grid_huf)],
+            ['Akku hozadéka', f(stats.saving_huf)],
+            ['Átlagos piaci ár', f(stats.avg_price_huf_kwh, "Ft/kWh")],
+            ['Napi fogyasztás', f(stats.total_load_kwh, "kWh")],
+            ['Napi PV termelés', f(stats.total_pv_kwh, "kWh")]
         ];
 
         statsDiv.innerHTML = entries.map(([title, value]) => `
@@ -109,6 +126,7 @@
 
     async function updateDashboard() {
         const selectedDate = document.getElementById('selectedDate').value;
+        const isLiveRequested = document.getElementById('forceRefresh').checked;
         const start = selectedDate;
         const end = getNextDate(selectedDate);
         const errorDiv = document.getElementById('error');
@@ -121,7 +139,7 @@
         statusText.textContent = '';
 
         try {
-            const response = await fetch(apiUrl(`/api/battery-monitor?start=${start}&end=${end}`));
+            const response = await fetch(apiUrl(`/api/battery-monitor?start=${start}&end=${end}&allow_live=true&force_refresh=${isLiveRequested}`));
             const data = await response.json();
             loader.style.display = 'none';
 
@@ -131,7 +149,9 @@
 
             renderStats(data.stats);
             plotImage.src = `data:image/png;base64,${data.plot_image_base64}`;
-            statusText.textContent = `Forras: ${data.source || 'unknown'} | Datum: ${start}`;
+
+            statusText.textContent = data.source === "cached" ? "cached" : "live";
+
         } catch (error) {
             loader.style.display = 'none';
             errorDiv.style.display = 'block';

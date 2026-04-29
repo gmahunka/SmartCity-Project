@@ -66,26 +66,31 @@ def index():
 def get_battery_monitor():
     start_str, end_str = get_requested_dates()
 
-    # Prefer stored data if available
-    stored = load_stored_data(start_str)
-    if stored:
-        stored["source"] = "cached"
-        return jsonify(stored)
+    force_refresh = request.args.get('force_refresh', 'false').strip().lower() in {'1', 'true', 'yes', 'on'}
+    allow_live = is_live_call_allowed()
 
-    # Live API call is explicit opt-in to protect API quota
-    if not is_live_call_allowed():
+    if not force_refresh:
+        stored = load_stored_data(start_str)
+        if stored:
+            stored["source"] = "cached"
+            return jsonify(stored)
+    
+
+
+    if not allow_live:
         return jsonify({
             "error": "No cached data available for the selected date.",
-            "source": "none",
-            "selected_date": start_str,
-            "available_dates": list_available_dates(),
-            "hint": "Run daily fetcher or call with allow_live=true to compute live data."
+            "source": "none"
         }), 404
 
     try:
         result = run_battery_monitoring(start_str, end_str)
-        result["source"] = "live"
+        if force_refresh:
+            result["source"] = "live_recomputed_unsaved"
+        else:
+            result["source"] = "live"
         return jsonify(result)
+    
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 

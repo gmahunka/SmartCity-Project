@@ -67,6 +67,12 @@ def get_real_entsoe_prices(start_date_str=None, end_date_str=None):
         prices_series = client.query_day_ahead_prices(COUNTRY_CODE, start=start, end=end)
         if prices_series.empty:
             return [30] * 24
+        
+        prices_series.index = prices_series.index.tz_convert('Europe/Budapest')
+
+        prices_series = prices_series.resample('h').mean()
+
+        prices_series = prices_series.iloc[:24]
 
         df = pd.DataFrame(prices_series, columns=['EUR_MWh'])
 
