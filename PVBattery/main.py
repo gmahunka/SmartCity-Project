@@ -15,19 +15,19 @@ except ImportError:
 def get_last_soc_from_previous_day(start_date_str):
     """Fetch the last SOC from the previous day's data file."""
     try:
+        import sqlite3
         prev_date = datetime.strptime(start_date_str, '%Y-%m-%d') - timedelta(days=1)
         prev_date_str = prev_date.strftime('%Y-%m-%d')
         data_dir = Path(__file__).parent.parent / "data"
-        prev_file = data_dir / f"{prev_date_str}.json"
-        if prev_file.exists():
-            with open(prev_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            if 'hourly' in data and len(data['hourly']) > 0:
-                last_entry = data['hourly'][-1]
-                soc = last_entry.get('soc_kwh')
-                if soc is not None:
-                    print(f"Using initial SOC {soc} from {prev_date_str} (last SOC of the day)")
-                    return float(soc)
+        db_path = data_dir / "energy_data.db"
+        if db_path.exists():
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT soc FROM hourly_data WHERE date = ? AND hour = 23", (prev_date_str,))
+                row = cursor.fetchone()
+                if row and row[0] is not None:
+                    print(f"Using initial SOC {row[0]} from {prev_date_str} (last SOC of the day)")
+                    return float(row[0])
     except Exception as e:
         print(f"Warning: Could not fetch previous SOC: {e}")
     return None

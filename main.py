@@ -1,6 +1,7 @@
 import json
 import os
-from datetime import datetime
+import sqlite3
+from datetime import datetime, timedelta
 from functools import wraps
 
 import pandas as pd
@@ -11,6 +12,7 @@ from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
 from PVBattery.main import run_battery_monitoring
+from PVBattery.visualizer import plot_results_base64
 
 load_dotenv()
 
@@ -35,22 +37,101 @@ def get_requested_dates():
 
 
 def load_stored_data(date_str):
-    """Load cached battery monitoring result for a given date."""
-    data_file = os.path.join(DATA_DIR, f"{date_str}.json")
-    if os.path.exists(data_file):
-        with open(data_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None
+    """Load cached battery monitoring result for a given date from SQLite database."""
+    db_path = os.path.join(DATA_DIR, "energy_data.db")
+    if not os.path.exists(db_path):
+        return None
+
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT * FROM daily_stats WHERE date = ?", (date_str,))
+            daily_row = cursor.fetchone()
+            if not daily_row:
+                return None
+            
+            cursor.execute("SELECT * FROM hourly_data WHERE date = ? ORDER BY hour ASC", (date_str,))
+            hourly_rows = cursor.fetchall()
+            
+            if not hourly_rows or len(hourly_rows) != 24:
+                return None
+            
+            hourly = []
+            T = range(24)
+            prices = []
+            pv = []
+            load = []
+            soc_values = []
+            battery = []
+            grid = []
+            
+            for r in hourly_rows:
+                hourly.append({
+                    'hour': r['hour'],
+                    'price_huf_kwh': r['price'],
+                    'pv_kw': r['pv'],
+                    'load_kw': r['load'],
+                    'battery_kw': r['battery'],
+                    'soc_kwh': r['soc'],
+                    'grid_kw': r['grid'],
+                })
+                prices.append(r['price'])
+                pv.append(r['pv'])
+                load.append(r['load'])
+                soc_values.append(r['soc'])
+                battery.append(r['battery'])
+                grid.append(r['grid'])
+                
+            pure_grid_cost = sum(load[t] * prices[t] for t in T)
+            avg_price = sum(prices) / len(prices) if prices else 0.0
+            
+            stats = {
+                'smart_cost_huf': daily_row['smart_cost'],
+                'no_battery_cost_huf': daily_row['no_battery_cost'],
+                'saving_huf': daily_row['savings'],
+                'total_pv_kwh': daily_row['pv_total'],
+                'total_load_kwh': daily_row['load_total'],
+                'eur_huf_rate': daily_row['rate'],
+                'avg_price_huf_kwh': avg_price,
+                'pure_grid_cost_huf': pure_grid_cost,
+                'total_saving_vs_grid_huf': pure_grid_cost - daily_row['smart_cost']
+            }
+
+            plot_b64 = plot_results_base64(T, prices, pv, load, soc_values, battery, grid)
+            
+            end_date_str = (datetime.strptime(date_str, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+            
+            return {
+                'status': 'Optimal',
+                'start_date': date_str,
+                'end_date': end_date_str,
+                'plot_image_base64': plot_b64,
+                'stats': stats,
+                'hourly': hourly
+            }
+            
+    except Exception as e:
+        print(f"Error reading from DB: {e}")
+        return None
 
 
 def list_available_dates():
-    if not os.path.isdir(DATA_DIR):
+    """Return list of dates that have stored data in SQLite database."""
+    db_path = os.path.join(DATA_DIR, "energy_data.db")
+    if not os.path.exists(db_path):
         return []
-    return sorted(
-        os.path.splitext(filename)[0]
-        for filename in os.listdir(DATA_DIR)
-        if filename.endswith('.json')
-    )
+    
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT date FROM daily_stats ORDER BY date ASC")
+            rows = cursor.fetchall()
+            return [row[0] for row in rows]
+    except Exception as e:
+        print(f"Error reading dates from DB: {e}")
+        return []
 
 
 def is_live_call_allowed():
