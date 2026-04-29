@@ -16,7 +16,7 @@ jobs:
       - name: Checkout target branch
         uses: actions/checkout@v4
         with:
-          ref: database
+          ref: szokeb/0429
           fetch-depth: 0
 
       - name: Set up Python
@@ -38,4 +38,4 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git add data/
           git diff --staged --quiet || git commit -m "data: $(date +%Y-%m-%d) daily fetch"
-          git push origin HEAD:database
+          git push origin HEAD:szokeb/0429
