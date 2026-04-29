@@ -66,7 +66,7 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
     eur_huf_rate = 410.0
 
     try:
-        rates_series = get_eur_huf_rates(start_date_str, end_date_str)
+        rates_series = get_eur_huf_rates()
         if not rates_series.empty:
             if start_date_str in rates_series.index:
                 eur_huf_rate = float(rates_series[start_date_str])

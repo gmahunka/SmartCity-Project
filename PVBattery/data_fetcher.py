@@ -14,10 +14,22 @@ from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
 load_dotenv()
 API_TOKEN = os.environ.get("ENTSOE_API_KEY")
 COUNTRY_CODE = "10YHU-MAVIR----U"
+FRANKFURTER_LATEST_URL = "https://api.frankfurter.dev/v1/latest?from=EUR&to=HUF"
 
 
-def get_eur_huf_rates(start_date_str, end_date_str):
-    url = "https://api.frankfurter.app/latest?from=EUR&to=HUF"
+def _extract_frankfurter_payload(data):
+    if isinstance(data, dict):
+        return data
+
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                return item
+
+    return None
+
+
+def get_eur_huf_rates():
     retry_delays = [0, 1, 2]
     last_error = None
 
@@ -26,10 +38,16 @@ def get_eur_huf_rates(start_date_str, end_date_str):
             time.sleep(delay)
 
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(FRANKFURTER_LATEST_URL, timeout=10)
             response.raise_for_status()
-            data = response.json()
-            rate = data.get('rates', {}).get('HUF')
+            data = _extract_frankfurter_payload(response.json())
+
+            if data is None:
+                last_error = "Unexpected Frankfurter payload type"
+                continue
+
+            rates = data.get('rates') or {}
+            rate = rates.get('HUF') if isinstance(rates, dict) else None
             date = data.get('date')
 
             if rate is not None and date:
@@ -37,7 +55,6 @@ def get_eur_huf_rates(start_date_str, end_date_str):
 
             last_error = "Missing 'HUF' rate or 'date' in response"
         except Exception as exc:
-            last_error = exc
             print(f"Attempt failed: {exc}")
 
     print(f"Warning: Failed to fetch exchange rates after retries: {last_error}")
@@ -76,7 +93,7 @@ def get_real_entsoe_prices(start_date_str=None, end_date_str=None):
 
         df = pd.DataFrame(prices_series, columns=['EUR_MWh'])
 
-        rates_series = get_eur_huf_rates(start_date_str, end_date_str)
+        rates_series = get_eur_huf_rates()
         rates_series.index = pd.to_datetime(rates_series.index)
         full_dates = pd.date_range(start=start_date_str, end=end_date_str, freq='D')
 

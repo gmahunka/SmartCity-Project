@@ -113,7 +113,8 @@
             ['Akku hozadéka', f(stats.saving_huf)],
             ['Átlagos piaci ár', f(stats.avg_price_huf_kwh, "Ft/kWh")],
             ['Napi fogyasztás', f(stats.total_load_kwh, "kWh")],
-            ['Napi PV termelés', f(stats.total_pv_kwh, "kWh")]
+            ['Napi PV termelés', f(stats.total_pv_kwh, "kWh")],
+            ['EUR/HUF árfolyam', `${(stats.eur_huf_rate ?? 410).toFixed(2)} HUF`],
         ];
 
         statsDiv.innerHTML = entries.map(([title, value]) => `
