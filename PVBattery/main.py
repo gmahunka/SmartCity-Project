@@ -1,5 +1,6 @@
 import pulp
 import json
+import pandas as pd
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
@@ -31,6 +32,37 @@ def get_last_soc_from_previous_day(start_date_str):
     except Exception as e:
         print(f"Warning: Could not fetch previous SOC: {e}")
     return None
+
+def get_load_profile_for_date(target_date_str):
+    """
+    Beolvassa a fogyasztási profilt a CSV-ből az adott napra vonatkozóan.
+    """
+    try:
+        # Meghatározzuk az elérési utat
+        csv_path = Path(__file__).parent.parent / "data" / "load_profiles.csv"
+        
+        
+        df = pd.read_csv(csv_path)
+        
+        
+        day_name = datetime.strptime(target_date_str, '%Y-%m-%d').strftime('%A')
+        
+        
+        day_row = df[df['day_of_week'] == day_name]
+        
+        if not day_row.empty:
+            
+            load_values = day_row.iloc[0, 1:25].values.tolist()
+            print(f"Loaded load profile for: {day_name}")
+            return [float(v) for v in load_values]
+        else:
+            print(f"Warning: Day {day_name} not found in CSV, using default.")
+    except Exception as e:
+        print(f"Error loading CSV profile: {e}")
+    
+    # backup if .csv not found
+    return [0.5, 0.4, 0.4, 0.4, 0.5, 1.2, 2.5, 3.0, 2.8, 2.5, 2.2, 
+            2.0, 2.2, 2.1, 2.0, 2.2, 2.8, 3.5, 4.0, 3.5, 2.0, 1.2, 0.8, 0.6]
 
 
 def run_battery_monitoring(start_date_str=None, end_date_str=None):
@@ -76,9 +108,7 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
         pass
 
     pv_gen = get_solar_forecast(start_date_str)
-    load = [ 0.5, 0.4, 0.4, 0.4, 0.5, 1.2, 2.5, 3.0, 2.8, 2.5, 2.2, 
-            2.0, 2.2, 2.1, 2.0, 2.2, 2.8, 3.5, 4.0, 3.5, 2.0, 1.2, 0.8, 0.6 ]
-
+    load = load = get_load_profile_for_date(start_date_str)
     
     model = pulp.LpProblem("Energy_Optimization", pulp.LpMinimize)
 
