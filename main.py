@@ -1,13 +1,9 @@
-import json
 import os
 import sqlite3
 from datetime import datetime, timedelta
-from functools import wraps
 
 import pandas as pd
-import requests
 from dotenv import load_dotenv
-from entsoe import EntsoePandasClient
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
@@ -20,8 +16,6 @@ app = Flask(__name__)
 CORS(app)
 
 API_KEY = os.environ.get("ENTSOE_API_KEY")
-COUNTRY_CODE = "10YHU-MAVIR----U"
-DEFAULT_HUF_RATE = 410.0
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
@@ -37,7 +31,7 @@ def get_requested_dates():
 
 
 def load_stored_data(date_str):
-    """Load cached battery monitoring result for a given date from SQLite database."""
+    """Load a cached battery monitoring result for a given date from SQLite."""
     db_path = os.path.join(DATA_DIR, "energy_data.db")
     if not os.path.exists(db_path):
         return None
@@ -118,7 +112,7 @@ def load_stored_data(date_str):
 
 
 def list_available_dates():
-    """Return list of dates that have stored data in SQLite database."""
+    """Return the dates that have stored data in SQLite."""
     db_path = os.path.join(DATA_DIR, "energy_data.db")
     if not os.path.exists(db_path):
         return []
@@ -178,13 +172,12 @@ def get_battery_monitor():
 
 @app.route('/api/available-dates')
 def get_available_dates():
-    """Return list of dates that have stored data."""
     return jsonify(list_available_dates())
 
 
 @app.route('/api/savings-series')
 def get_savings_series():
-    """Return time series of savings and related daily metrics from the DB.
+    """Return savings and related daily metrics from the database.
 
     Optional query params:
       - start: inclusive start date (YYYY-MM-DD)
@@ -225,7 +218,6 @@ def get_savings_series():
 
             series = []
             for r in rows:
-                # Calculate pure grid cost (load * price for each hour, summed)
                 date_str = r['date']
                 cursor.execute("SELECT price, load FROM hourly_data WHERE date = ? ORDER BY hour ASC", (date_str,))
                 hourly_rows = cursor.fetchall()

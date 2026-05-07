@@ -1,8 +1,4 @@
-# SmartCity Data Fetcher — Standalone Runner
-
-# This script is designed to be run daily by GitHub Actions.
-# It fetches prices + PV data, runs battery optimization, and saves to database.
-# Run without Flask — just: python3 fetcher.py
+"""Standalone daily fetch runner for SmartCity data collection."""
 
 import json
 import os
@@ -10,7 +6,6 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# Ensure project root is in path
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -23,14 +18,13 @@ DB_PATH = DATA_DIR / "energy_data.db"
 
 def save_to_database(result_dict):
     """
-    Saves the battery monitoring result to SQLite database.
-    Ensures idempotency, creates schema if needed, and uses a single transaction.
+    Save the battery monitoring result to SQLite.
+    The schema is created on demand and writes are committed atomically.
     """
     DATA_DIR.mkdir(exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     cursor = conn.cursor()
-    
-    # 1. Schema Setup
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS daily_stats (
             date TEXT UNIQUE,
@@ -60,14 +54,12 @@ def save_to_database(result_dict):
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_hourly_date ON hourly_data(date)
     ''')
-    
+
     date_str = result_dict['start_date']
     stats = result_dict['stats']
     hourly = result_dict['hourly']
-    
-    # 4. Data Integrity: use a single transaction
+
     try:
-        # 3. Idempotency (UPSERT)
         cursor.execute('''
             INSERT OR REPLACE INTO daily_stats 
             (date, smart_cost, no_battery_cost, savings, pv_total, load_total, rate)
@@ -100,7 +92,7 @@ def save_to_database(result_dict):
             (date, hour, price, pv, load, battery, soc, grid)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', hourly_records)
-        
+
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -128,7 +120,6 @@ def fetch_and_save(target_date_str=None):
     if 'plot_image_base64' in result:
         del result['plot_image_base64']
 
-    # Save to SQLite db
     save_to_database(result)
     print(f"Saved to database {DB_PATH}")
     return result
