@@ -75,7 +75,13 @@
             <button onclick="loadSavingsSeries()">Frissítés</button>
         </div>
 
-        <div style="margin-top:12px; position:relative; width:100%; height:400px; background:#fff; border-radius:8px; padding:8px; border:1px solid #ddd;">
+        <div style="margin-top:12px; margin-bottom:24px; position:relative; width:100%; height:360px; background:#fff; border-radius:8px; padding:8px; border:1px solid #ddd;">
+            <h3 style="margin:0 0 8px 0;">Költségek összehasonlítása</h3>
+            <canvas id="costsChart"></canvas>
+        </div>
+
+        <div style="margin-top:24px; position:relative; width:100%; height:360px; background:#fff; border-radius:8px; padding:8px; border:1px solid #ddd;">
+            <h3 style="margin:0 0 8px 0;">Megtakarítások összehasonlítása</h3>
             <canvas id="savingsChart"></canvas>
         </div>
     </div>
@@ -310,6 +316,7 @@
     }
 
     // --- Savings series / Chart.js ---
+    let costsChart = null;
     let savingsChart = null;
 
     function parseDate(d) { return new Date(d + 'T00:00:00'); }
@@ -347,7 +354,8 @@
 
     async function loadSavingsSeries() {
         const agg = document.getElementById('aggSelect').value;
-        const ctx = document.getElementById('savingsChart').getContext('2d');
+        const costsCtx = document.getElementById('costsChart').getContext('2d');
+        const savingsCtx = document.getElementById('savingsChart').getContext('2d');
         try {
             const resp = await fetch(apiUrl('/api/savings-series'));
             if (!resp.ok) throw new Error('Failed to load savings series');
@@ -357,26 +365,51 @@
             const used = aggregateSeries(filteredSeries, agg);
 
             const labels = used.map(r => r.date);
-            const savingsData = used.map(r => r.savings || 0);
             const smartData = used.map(r => r.smart_cost || 0);
             const noBatteryData = used.map(r => r.no_battery_cost || 0);
             const pureGridData = used.map(r => r.pure_grid_cost || 0);
 
-            const datasets = [
-                { label: 'Megtakarítás (HUF)', data: savingsData, borderColor: '#2b8cbe', backgroundColor: 'rgba(43,140,190,0.08)', tension:0.2 },
+            const savingsGridSmartData = used.map(r => (r.pure_grid_cost || 0) - (r.smart_cost || 0));
+            const savingsGridNoBatteryData = used.map(r => (r.pure_grid_cost || 0) - (r.no_battery_cost || 0));
+            const savingsNoBatterySmartData = used.map(r => (r.no_battery_cost || 0) - (r.smart_cost || 0));
+
+            const costDatasets = [
                 { label: 'Okos rendszer költség (HUF)', data: smartData, borderColor: '#7b3294', backgroundColor: 'rgba(123,50,148,0.06)', tension:0.2 },
                 { label: 'Akku nélküli költség (HUF)', data: noBatteryData, borderColor: '#f46d43', backgroundColor: 'rgba(244,109,67,0.06)', tension:0.2 },
                 { label: 'Csak hálózati költség (HUF)', data: pureGridData, borderColor: '#d62728', backgroundColor: 'rgba(214,39,40,0.06)', tension:0.2 }
             ];
 
+            const savingsDatasets = [
+                { label: 'Csak hálózat - okos rendszer', data: savingsGridSmartData, borderColor: '#1f77b4', backgroundColor: 'rgba(31,119,180,0.08)', tension:0.2 },
+                { label: 'Csak hálózat - akkumulátor nélküli', data: savingsGridNoBatteryData, borderColor: '#2ca02c', backgroundColor: 'rgba(44,160,44,0.08)', tension:0.2 },
+                { label: 'Akkumulátor nélküli - okos rendszer', data: savingsNoBatterySmartData, borderColor: '#ff7f0e', backgroundColor: 'rgba(255,127,14,0.08)', tension:0.2 }
+            ];
+
+            if (costsChart) {
+                costsChart.data.labels = labels;
+                costsChart.data.datasets = costDatasets;
+                costsChart.update();
+            } else {
+                costsChart = new Chart(costsCtx, {
+                    type: 'line',
+                    data: { labels, datasets: costDatasets },
+                    options: {
+                        responsive: true,
+                        plugins: { legend: { position: 'top' } },
+                        interaction: { mode: 'index', intersect: false },
+                        scales: { x: { display: true }, y: { display: true } }
+                    }
+                });
+            }
+
             if (savingsChart) {
                 savingsChart.data.labels = labels;
-                savingsChart.data.datasets = datasets;
+                savingsChart.data.datasets = savingsDatasets;
                 savingsChart.update();
             } else {
-                savingsChart = new Chart(ctx, {
+                savingsChart = new Chart(savingsCtx, {
                     type: 'line',
-                    data: { labels, datasets },
+                    data: { labels, datasets: savingsDatasets },
                     options: {
                         responsive: true,
                         plugins: { legend: { position: 'top' } },
