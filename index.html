@@ -55,7 +55,7 @@
     <div id="savingsPane">
         <div class="controls">
             <label for="aggSelect">Összesítés:</label>
-            <select id="aggSelect">
+            <select id="aggSelect" onchange="loadSavingsSeries()">
                 <option value="daily">Napi</option>
                 <option value="weekly">Heti</option>
                 <option value="monthly">Havi</option>
@@ -67,11 +67,11 @@
                 <option value="last14">Utolsó 14 nap</option>
                 <option value="last30">Utolsó 30 nap</option>
                 <option value="all">Teljes időszak</option>
-                <option value="custom">Egyedi</option>
+                <option value="custom">Egyéni</option>
             </select>
 
-            <input type="date" id="startDate" style="display:none;">
-            <input type="date" id="endDate" style="display:none;">
+            <input type="date" id="startDate" style="display:none;" onchange="loadSavingsSeries()">
+            <input type="date" id="endDate" style="display:none;" onchange="loadSavingsSeries()">
             <button onclick="loadSavingsSeries()">Frissítés</button>
         </div>
 
@@ -140,15 +140,15 @@
 
         const f = (val, unit = " Ft") => {
             if (val === undefined || val === null || isNaN(val)) {
-                return "Nincs adat";
+                return "N/A";
             }
             return val.toFixed(2) + " " + unit;
         };
 
         const entries = [
-            ['Költség (csak hálózat)', f(stats.pure_grid_cost_huf)],
-            ['Költség (akku nélkül)', f(stats.no_battery_cost_huf)],
-            ['Költség (okos rendszer)', f(stats.smart_cost_huf)],
+            ['Költség (Csak hálózat)', f(stats.pure_grid_cost_huf)],
+            ['Költség (Akku nélkül)', f(stats.no_battery_cost_huf)],
+            ['Költség (Okos rendszer)', f(stats.smart_cost_huf)],
             ['Összes megtakarítás', f(stats.total_saving_vs_grid_huf)],
             ['Akku hozadéka', f(stats.saving_huf)],
             ['Átlagos piaci ár', f(stats.avg_price_huf_kwh, "Ft/kWh")],
@@ -214,7 +214,7 @@
         if (tab === 'savings') loadSavingsSeries();
     }
 
-    // --- Dátumtartomány kezelése ---
+    // --- Date range handling ---
     function updateDateInputs() {
         const rangeSelect = document.getElementById('rangeSelect');
         const startInput = document.getElementById('startDate');
@@ -229,6 +229,8 @@
             startInput.style.display = 'none';
             endInput.style.display = 'none';
         }
+
+        loadSavingsSeries();
     }
 
     function getDateRange() {
@@ -258,6 +260,55 @@
         return { start: formatDate(start), end: formatDate(end) };
     }
 
+    function filterSeriesByRange(series) {
+        const rangeSelect = document.getElementById('rangeSelect');
+        if (!Array.isArray(series) || series.length === 0) {
+            return [];
+        }
+
+        if (rangeSelect.value === 'all') {
+            return series;
+        }
+
+        // Anchor presets to the latest cached day to avoid "all presets look the same" when data is historical.
+        const latestDate = new Date(series[series.length - 1].date + 'T00:00:00');
+        let startDate = null;
+        let endDate = null;
+
+        if (rangeSelect.value === 'custom') {
+            const s = document.getElementById('startDate').value;
+            const e = document.getElementById('endDate').value;
+            if (!s || !e) {
+                return series;
+            }
+            startDate = new Date(s + 'T00:00:00');
+            endDate = new Date(e + 'T23:59:59');
+        } else {
+            endDate = new Date(latestDate);
+            endDate.setHours(23, 59, 59, 999);
+            startDate = new Date(endDate);
+            if (rangeSelect.value === 'last7') {
+                startDate.setDate(startDate.getDate() - 6);
+            } else if (rangeSelect.value === 'last14') {
+                startDate.setDate(startDate.getDate() - 13);
+            } else if (rangeSelect.value === 'last30') {
+                startDate.setDate(startDate.getDate() - 29);
+            }
+            startDate.setHours(0, 0, 0, 0);
+            const startInput = document.getElementById('startDate');
+            const endInput = document.getElementById('endDate');
+            if (startInput && endInput && rangeSelect.value !== 'custom') {
+                startInput.value = formatDate(startDate);
+                endInput.value = formatDate(endDate);
+            }
+        }
+
+        return series.filter((row) => {
+            const d = new Date(row.date + 'T00:00:00');
+            return d >= startDate && d <= endDate;
+        });
+    }
+
     // --- Savings series / Chart.js ---
     let savingsChart = null;
 
@@ -271,7 +322,7 @@
             let key;
             if (mode === 'weekly') {
                 const temp = new Date(dt.valueOf());
-                const day = (dt.getDay() + 6) % 7; // Hétfő = 0
+                const day = (dt.getDay() + 6) % 7; // Monday=0
                 temp.setDate(temp.getDate() - day);
                 const y = temp.getFullYear();
                 const m = String(temp.getMonth() + 1).padStart(2, '0');
@@ -296,22 +347,14 @@
 
     async function loadSavingsSeries() {
         const agg = document.getElementById('aggSelect').value;
-        const { start, end } = getDateRange();
         const ctx = document.getElementById('savingsChart').getContext('2d');
         try {
-            let url = apiUrl('/api/savings-series');
-            if (start || end) {
-                const params = [];
-                if (start) params.push(`start=${start}`);
-                if (end) params.push(`end=${end}`);
-                url += '?' + params.join('&');
-            }
-            
-            const resp = await fetch(url);
+            const resp = await fetch(apiUrl('/api/savings-series'));
             if (!resp.ok) throw new Error('Failed to load savings series');
             const series = await resp.json();
+            const filteredSeries = filterSeriesByRange(series);
 
-            const used = aggregateSeries(series, agg);
+            const used = aggregateSeries(filteredSeries, agg);
 
             const labels = used.map(r => r.date);
             const savingsData = used.map(r => r.savings || 0);
@@ -320,10 +363,10 @@
             const pureGridData = used.map(r => r.pure_grid_cost || 0);
 
             const datasets = [
-                { label: 'Megtakarítás (Ft)', data: savingsData, borderColor: '#2b8cbe', backgroundColor: 'rgba(43,140,190,0.08)', tension:0.2 },
-                { label: 'Okos rendszer költsége (Ft)', data: smartData, borderColor: '#7b3294', backgroundColor: 'rgba(123,50,148,0.06)', tension:0.2 },
-                { label: 'Akku nélküli költség (Ft)', data: noBatteryData, borderColor: '#f46d43', backgroundColor: 'rgba(244,109,67,0.06)', tension:0.2 },
-                { label: 'Csak hálózat költsége (Ft)', data: pureGridData, borderColor: '#d62728', backgroundColor: 'rgba(214,39,40,0.06)', tension:0.2 }
+                { label: 'Megtakarítás (HUF)', data: savingsData, borderColor: '#2b8cbe', backgroundColor: 'rgba(43,140,190,0.08)', tension:0.2 },
+                { label: 'Okos rendszer költség (HUF)', data: smartData, borderColor: '#7b3294', backgroundColor: 'rgba(123,50,148,0.06)', tension:0.2 },
+                { label: 'Akku nélküli költség (HUF)', data: noBatteryData, borderColor: '#f46d43', backgroundColor: 'rgba(244,109,67,0.06)', tension:0.2 },
+                { label: 'Csak hálózati költség (HUF)', data: pureGridData, borderColor: '#d62728', backgroundColor: 'rgba(214,39,40,0.06)', tension:0.2 }
             ];
 
             if (savingsChart) {
