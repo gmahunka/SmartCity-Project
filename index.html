@@ -6,6 +6,9 @@
     <style>
         body { font-family: sans-serif; padding: 20px; background: #eee; }
         .container { max-width: 1000px; margin: auto; background: white; padding: 20px; border-radius: 10px; }
+        .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+        .tab { padding: 8px 12px; background: #f5f5f5; border-radius: 6px; cursor: pointer; }
+        .tab.active { background: #007bff; color: white; }
         .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
         .error-msg { color: red; font-weight: bold; margin: 10px 0; display: none; }
         .loading { display: none; color: blue; }
@@ -15,30 +18,68 @@
         .stat-value { font-size: 20px; font-weight: bold; margin-top: 4px; }
         #plotContainer { margin-top: 16px; }
         #plotImage { max-width: 100%; border-radius: 8px; border: 1px solid #ddd; }
+        #savingsPane { display: none; }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
 
 <div class="container">
     <h1>Battery Monitoring</h1>
 
-    <div class="controls">
-        Datum: <input type="date" id="selectedDate">
-        <label>
-            <input type="checkbox" id="forceRefresh"> Live
-        </label>
-        <button onclick="updateDashboard()">Lekeres</button>
+    <div class="tabs">
+        <div id="tabDashboard" class="tab active" onclick="showTab('dashboard')">Dashboard</div>
+        <div id="tabSavings" class="tab" onclick="showTab('savings')">Savings over time</div>
     </div>
 
-    <div id="error" class="error-msg">Hiba tortent a lekeres soran!</div>
-    <div id="loader" class="loading">Adatok betoltese...</div>
+    <div id="dashboardPane">
+        <div class="controls">
+            Datum: <input type="date" id="selectedDate">
+            <label>
+                <input type="checkbox" id="forceRefresh"> Live
+            </label>
+            <button onclick="updateDashboard()">Lekeres</button>
+        </div>
 
-    <div id="statusText"></div>
-    <div id="stats" class="stats"></div>
+        <div id="error" class="error-msg">Hiba tortent a lekeres soran!</div>
+        <div id="loader" class="loading">Adatok betoltese...</div>
 
-    <div id="plotContainer">
-        <img id="plotImage" alt="Battery matplotlib diagram">
+        <div id="statusText"></div>
+        <div id="stats" class="stats"></div>
+
+        <div id="plotContainer">
+            <img id="plotImage" alt="Battery matplotlib diagram">
+        </div>
     </div>
+
+    <div id="savingsPane">
+        <div class="controls">
+            <label for="aggSelect">Aggregation:</label>
+            <select id="aggSelect">
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+            </select>
+
+            <label for="rangeSelect">Date Range:</label>
+            <select id="rangeSelect" onchange="updateDateInputs()">
+                <option value="last7">Last 7 days</option>
+                <option value="last14">Last 14 days</option>
+                <option value="last30">Last 30 days</option>
+                <option value="all">All time</option>
+                <option value="custom">Custom</option>
+            </select>
+
+            <input type="date" id="startDate" style="display:none;">
+            <input type="date" id="endDate" style="display:none;">
+            <button onclick="loadSavingsSeries()">Refresh</button>
+        </div>
+
+        <div style="margin-top:12px; position:relative; width:100%; height:400px; background:#fff; border-radius:8px; padding:8px; border:1px solid #ddd;">
+            <canvas id="savingsChart"></canvas>
+        </div>
+    </div>
+
 </div>
 
 <script>
@@ -97,7 +138,6 @@
             return;
         }
 
-    
         const f = (val, unit = " Ft") => {
             if (val === undefined || val === null || isNaN(val)) {
                 return "N/A";
@@ -165,6 +205,149 @@
         await setDefaultDate();
         updateDashboard();
     };
+
+    function showTab(tab) {
+        document.getElementById('dashboardPane').style.display = tab === 'dashboard' ? 'block' : 'none';
+        document.getElementById('savingsPane').style.display = tab === 'savings' ? 'block' : 'none';
+        document.getElementById('tabDashboard').classList.toggle('active', tab === 'dashboard');
+        document.getElementById('tabSavings').classList.toggle('active', tab === 'savings');
+        if (tab === 'savings') loadSavingsSeries();
+    }
+
+    // --- Date range handling ---
+    function updateDateInputs() {
+        const rangeSelect = document.getElementById('rangeSelect');
+        const startInput = document.getElementById('startDate');
+        const endInput = document.getElementById('endDate');
+        
+        if (rangeSelect.value === 'custom') {
+            startInput.style.display = 'inline-block';
+            endInput.style.display = 'inline-block';
+            if (!startInput.value) startInput.value = formatDate(new Date(Date.now() - 30*86400000));
+            if (!endInput.value) endInput.value = formatDate(new Date());
+        } else {
+            startInput.style.display = 'none';
+            endInput.style.display = 'none';
+        }
+    }
+
+    function getDateRange() {
+        const rangeSelect = document.getElementById('rangeSelect');
+        const now = new Date();
+        let start, end;
+
+        end = new Date(now);
+        end.setHours(23, 59, 59, 999);
+
+        if (rangeSelect.value === 'custom') {
+            start = new Date(document.getElementById('startDate').value + 'T00:00:00');
+            end = new Date(document.getElementById('endDate').value + 'T23:59:59');
+        } else if (rangeSelect.value === 'last7') {
+            start = new Date(now);
+            start.setDate(start.getDate() - 7);
+        } else if (rangeSelect.value === 'last14') {
+            start = new Date(now);
+            start.setDate(start.getDate() - 14);
+        } else if (rangeSelect.value === 'last30') {
+            start = new Date(now);
+            start.setDate(start.getDate() - 30);
+        } else { // all
+            return { start: null, end: null };
+        }
+
+        return { start: formatDate(start), end: formatDate(end) };
+    }
+
+    // --- Savings series / Chart.js ---
+    let savingsChart = null;
+
+    function parseDate(d) { return new Date(d + 'T00:00:00'); }
+
+    function aggregateSeries(series, mode) {
+        if (mode === 'daily') return series;
+        const grouped = {};
+        for (const r of series) {
+            const dt = parseDate(r.date);
+            let key;
+            if (mode === 'weekly') {
+                const temp = new Date(dt.valueOf());
+                const day = (dt.getDay() + 6) % 7; // Monday=0
+                temp.setDate(temp.getDate() - day);
+                const y = temp.getFullYear();
+                const m = String(temp.getMonth() + 1).padStart(2, '0');
+                const d = String(temp.getDate()).padStart(2, '0');
+                key = `${y}-${m}-${d}`;
+            } else {
+                const y = dt.getFullYear();
+                const m = String(dt.getMonth() + 1).padStart(2, '0');
+                key = `${y}-${m}-01`;
+            }
+            if (!grouped[key]) grouped[key] = {count:0, savings:0, smart_cost:0, no_battery_cost:0, pure_grid_cost:0, pv_total:0, load_total:0};
+            grouped[key].count += 1;
+            grouped[key].savings += (r.savings || 0);
+            grouped[key].smart_cost += (r.smart_cost || 0);
+            grouped[key].no_battery_cost += (r.no_battery_cost || 0);
+            grouped[key].pure_grid_cost += (r.pure_grid_cost || 0);
+            grouped[key].pv_total += (r.pv_total || 0);
+            grouped[key].load_total += (r.load_total || 0);
+        }
+        return Object.keys(grouped).sort().map(k => ({ date: k, savings: grouped[k].savings, smart_cost: grouped[k].smart_cost, no_battery_cost: grouped[k].no_battery_cost, pure_grid_cost: grouped[k].pure_grid_cost, pv_total: grouped[k].pv_total, load_total: grouped[k].load_total }));
+    }
+
+    async function loadSavingsSeries() {
+        const agg = document.getElementById('aggSelect').value;
+        const { start, end } = getDateRange();
+        const ctx = document.getElementById('savingsChart').getContext('2d');
+        try {
+            let url = apiUrl('/api/savings-series');
+            if (start || end) {
+                const params = [];
+                if (start) params.push(`start=${start}`);
+                if (end) params.push(`end=${end}`);
+                url += '?' + params.join('&');
+            }
+            
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error('Failed to load savings series');
+            const series = await resp.json();
+
+            const used = aggregateSeries(series, agg);
+
+            const labels = used.map(r => r.date);
+            const savingsData = used.map(r => r.savings || 0);
+            const smartData = used.map(r => r.smart_cost || 0);
+            const noBatteryData = used.map(r => r.no_battery_cost || 0);
+            const pureGridData = used.map(r => r.pure_grid_cost || 0);
+
+            const datasets = [
+                { label: 'Savings (HUF)', data: savingsData, borderColor: '#2b8cbe', backgroundColor: 'rgba(43,140,190,0.08)', tension:0.2 },
+                { label: 'Smart cost (HUF)', data: smartData, borderColor: '#7b3294', backgroundColor: 'rgba(123,50,148,0.06)', tension:0.2 },
+                { label: 'No-battery cost (HUF)', data: noBatteryData, borderColor: '#f46d43', backgroundColor: 'rgba(244,109,67,0.06)', tension:0.2 },
+                { label: 'Pure grid cost (HUF)', data: pureGridData, borderColor: '#d62728', backgroundColor: 'rgba(214,39,40,0.06)', tension:0.2 }
+            ];
+
+            if (savingsChart) {
+                savingsChart.data.labels = labels;
+                savingsChart.data.datasets = datasets;
+                savingsChart.update();
+            } else {
+                savingsChart = new Chart(ctx, {
+                    type: 'line',
+                    data: { labels, datasets },
+                    options: {
+                        responsive: true,
+                        plugins: { legend: { position: 'top' } },
+                        interaction: { mode: 'index', intersect: false },
+                        scales: { x: { display: true }, y: { display: true } }
+                    }
+                });
+            }
+
+        } catch (err) {
+            console.error('Error loading savings series', err);
+        }
+    }
+
 </script>
 </body>
 </html>
