@@ -119,7 +119,7 @@ def get_real_entsoe_prices(start_date_str=None, end_date_str=None):
         return prices_in_huf[:24]
 
     except Exception as e:
-        print(f"Hiba az API híváskor: {e}")
+        print(f"Hiba az ENTSO-E API híváskor: {e}")
         return [30] * 24
 
 def get_solar_forecast(target_date_str=None):
