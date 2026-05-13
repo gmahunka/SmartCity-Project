@@ -2,10 +2,13 @@
 <html lang="hu">
 <head>
     <meta charset="UTF-8">
-    <title>Battery Monitor</title>
+    <title>Akkumulátorfigyelő</title>
     <style>
         body { font-family: sans-serif; padding: 20px; background: #eee; }
         .container { max-width: 1000px; margin: auto; background: white; padding: 20px; border-radius: 10px; }
+        .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+        .tab { padding: 8px 12px; background: #f5f5f5; border-radius: 6px; cursor: pointer; }
+        .tab.active { background: #007bff; color: white; }
         .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
         .error-msg { color: red; font-weight: bold; margin: 10px 0; display: none; }
         .loading { display: none; color: blue; }
@@ -15,30 +18,74 @@
         .stat-value { font-size: 20px; font-weight: bold; margin-top: 4px; }
         #plotContainer { margin-top: 16px; }
         #plotImage { max-width: 100%; border-radius: 8px; border: 1px solid #ddd; }
+        #savingsPane { display: none; }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
 
 <div class="container">
-    <h1>Battery Monitoring</h1>
+    <h1>Akkumulátorfigyelés</h1>
 
-    <div class="controls">
-        Datum: <input type="date" id="selectedDate">
-        <label>
-            <input type="checkbox" id="forceRefresh"> Live
-        </label>
-        <button onclick="updateDashboard()">Lekeres</button>
+    <div class="tabs">
+        <div id="tabDashboard" class="tab active" onclick="showTab('dashboard')">Vezérlőpult</div>
+        <div id="tabSavings" class="tab" onclick="showTab('savings')">Megtakarítások</div>
     </div>
 
-    <div id="error" class="error-msg">Hiba tortent a lekeres soran!</div>
-    <div id="loader" class="loading">Adatok betoltese...</div>
+    <div id="dashboardPane">
+        <div class="controls">
+            Dátum: <input type="date" id="selectedDate">
+            <label>
+                <input type="checkbox" id="forceRefresh"> Élő
+            </label>
+            <button onclick="updateDashboard()">Lekérés</button>
+        </div>
 
-    <div id="statusText"></div>
-    <div id="stats" class="stats"></div>
+        <div id="error" class="error-msg">Hiba tortent a lekeres soran!</div>
+        <div id="loader" class="loading">Adatok betoltese...</div>
 
-    <div id="plotContainer">
-        <img id="plotImage" alt="Battery matplotlib diagram">
+        <div id="statusText"></div>
+        <div id="stats" class="stats"></div>
+
+        <div id="plotContainer">
+            <img id="plotImage" alt="Akkumulátor diagram">
+        </div>
     </div>
+
+    <div id="savingsPane">
+        <div class="controls">
+            <label for="aggSelect">Összesítés:</label>
+            <select id="aggSelect" onchange="loadSavingsSeries()">
+                <option value="daily">Napi</option>
+                <option value="weekly">Heti</option>
+                <option value="monthly">Havi</option>
+            </select>
+
+            <label for="rangeSelect">Dátumtartomány:</label>
+            <select id="rangeSelect" onchange="updateDateInputs()">
+                <option value="last7">Utolsó 7 nap</option>
+                <option value="last14">Utolsó 14 nap</option>
+                <option value="last30">Utolsó 30 nap</option>
+                <option value="all">Teljes időszak</option>
+                <option value="custom">Egyéni</option>
+            </select>
+
+            <input type="date" id="startDate" style="display:none;" onchange="loadSavingsSeries()">
+            <input type="date" id="endDate" style="display:none;" onchange="loadSavingsSeries()">
+            <button onclick="loadSavingsSeries()">Frissítés</button>
+        </div>
+
+        <div style="margin-top:12px; margin-bottom:24px; position:relative; width:100%; height:360px; background:#fff; border-radius:8px; padding:8px; border:1px solid #ddd;">
+            <h3 style="margin:0 0 8px 0;">Költségek összehasonlítása</h3>
+            <canvas id="costsChart"></canvas>
+        </div>
+
+        <div style="margin-top:24px; position:relative; width:100%; height:360px; background:#fff; border-radius:8px; padding:8px; border:1px solid #ddd;">
+            <h3 style="margin:0 0 8px 0;">Megtakarítások összehasonlítása</h3>
+            <canvas id="savingsChart"></canvas>
+        </div>
+    </div>
+
 </div>
 
 <script>
@@ -70,7 +117,7 @@
         try {
             const response = await fetch(apiUrl('/api/available-dates'));
             if (!response.ok) {
-                throw new Error('Failed to load available dates');
+                throw new Error('Nem sikerült betölteni az elérhető dátumokat');
             }
             const availableDates = await response.json();
             if (Array.isArray(availableDates) && availableDates.length > 0) {
@@ -78,7 +125,7 @@
                 return;
             }
         } catch (error) {
-            console.warn('Could not fetch available dates, falling back to yesterday.', error);
+            console.warn('Nem sikerült lekérni az elérhető dátumokat, visszatérés a tegnapi napra.', error);
         }
 
         dateInput.value = getYesterdayDateString();
@@ -97,7 +144,6 @@
             return;
         }
 
-    
         const f = (val, unit = " Ft") => {
             if (val === undefined || val === null || isNaN(val)) {
                 return "N/A";
@@ -145,18 +191,18 @@
             loader.style.display = 'none';
 
             if (!response.ok || data.error) {
-                throw new Error(data.error || 'Server error');
+                throw new Error(data.error || 'Kiszolgálóhiba');
             }
 
             renderStats(data.stats);
             plotImage.src = `data:image/png;base64,${data.plot_image_base64}`;
 
-            statusText.textContent = data.source === "cached" ? "cached" : "live";
+            statusText.textContent = data.source === "cached" ? "Forrás: gyorsítótár" : "Forrás: élő adat";
 
         } catch (error) {
             loader.style.display = 'none';
             errorDiv.style.display = 'block';
-            errorDiv.innerText = `Error: ${error.message}`;
+            errorDiv.innerText = `Hiba: ${error.message}`;
             console.error(error);
         }
     }
@@ -165,6 +211,219 @@
         await setDefaultDate();
         updateDashboard();
     };
+
+    function showTab(tab) {
+        document.getElementById('dashboardPane').style.display = tab === 'dashboard' ? 'block' : 'none';
+        document.getElementById('savingsPane').style.display = tab === 'savings' ? 'block' : 'none';
+        document.getElementById('tabDashboard').classList.toggle('active', tab === 'dashboard');
+        document.getElementById('tabSavings').classList.toggle('active', tab === 'savings');
+        if (tab === 'savings') loadSavingsSeries();
+    }
+
+    // --- Date range handling ---
+    function updateDateInputs() {
+        const rangeSelect = document.getElementById('rangeSelect');
+        const startInput = document.getElementById('startDate');
+        const endInput = document.getElementById('endDate');
+        
+        if (rangeSelect.value === 'custom') {
+            startInput.style.display = 'inline-block';
+            endInput.style.display = 'inline-block';
+            if (!startInput.value) startInput.value = formatDate(new Date(Date.now() - 30*86400000));
+            if (!endInput.value) endInput.value = formatDate(new Date());
+        } else {
+            startInput.style.display = 'none';
+            endInput.style.display = 'none';
+        }
+
+        loadSavingsSeries();
+    }
+
+    function getDateRange() {
+        const rangeSelect = document.getElementById('rangeSelect');
+        const now = new Date();
+        let start, end;
+
+        end = new Date(now);
+        end.setHours(23, 59, 59, 999);
+
+        if (rangeSelect.value === 'custom') {
+            start = new Date(document.getElementById('startDate').value + 'T00:00:00');
+            end = new Date(document.getElementById('endDate').value + 'T23:59:59');
+        } else if (rangeSelect.value === 'last7') {
+            start = new Date(now);
+            start.setDate(start.getDate() - 7);
+        } else if (rangeSelect.value === 'last14') {
+            start = new Date(now);
+            start.setDate(start.getDate() - 14);
+        } else if (rangeSelect.value === 'last30') {
+            start = new Date(now);
+            start.setDate(start.getDate() - 30);
+        } else { // all
+            return { start: null, end: null };
+        }
+
+        return { start: formatDate(start), end: formatDate(end) };
+    }
+
+    function filterSeriesByRange(series) {
+        const rangeSelect = document.getElementById('rangeSelect');
+        if (!Array.isArray(series) || series.length === 0) {
+            return [];
+        }
+
+        if (rangeSelect.value === 'all') {
+            return series;
+        }
+
+        // Anchor presets to the latest cached day to avoid "all presets look the same" when data is historical.
+        const latestDate = new Date(series[series.length - 1].date + 'T00:00:00');
+        let startDate = null;
+        let endDate = null;
+
+        if (rangeSelect.value === 'custom') {
+            const s = document.getElementById('startDate').value;
+            const e = document.getElementById('endDate').value;
+            if (!s || !e) {
+                return series;
+            }
+            startDate = new Date(s + 'T00:00:00');
+            endDate = new Date(e + 'T23:59:59');
+        } else {
+            endDate = new Date(latestDate);
+            endDate.setHours(23, 59, 59, 999);
+            startDate = new Date(endDate);
+            if (rangeSelect.value === 'last7') {
+                startDate.setDate(startDate.getDate() - 6);
+            } else if (rangeSelect.value === 'last14') {
+                startDate.setDate(startDate.getDate() - 13);
+            } else if (rangeSelect.value === 'last30') {
+                startDate.setDate(startDate.getDate() - 29);
+            }
+            startDate.setHours(0, 0, 0, 0);
+            const startInput = document.getElementById('startDate');
+            const endInput = document.getElementById('endDate');
+            if (startInput && endInput && rangeSelect.value !== 'custom') {
+                startInput.value = formatDate(startDate);
+                endInput.value = formatDate(endDate);
+            }
+        }
+
+        return series.filter((row) => {
+            const d = new Date(row.date + 'T00:00:00');
+            return d >= startDate && d <= endDate;
+        });
+    }
+
+    // --- Savings series / Chart.js ---
+    let costsChart = null;
+    let savingsChart = null;
+
+    function parseDate(d) { return new Date(d + 'T00:00:00'); }
+
+    function aggregateSeries(series, mode) {
+        if (mode === 'daily') return series;
+        const grouped = {};
+        for (const r of series) {
+            const dt = parseDate(r.date);
+            let key;
+            if (mode === 'weekly') {
+                const temp = new Date(dt.valueOf());
+                const day = (dt.getDay() + 6) % 7; // Monday=0
+                temp.setDate(temp.getDate() - day);
+                const y = temp.getFullYear();
+                const m = String(temp.getMonth() + 1).padStart(2, '0');
+                const d = String(temp.getDate()).padStart(2, '0');
+                key = `${y}-${m}-${d}`;
+            } else {
+                const y = dt.getFullYear();
+                const m = String(dt.getMonth() + 1).padStart(2, '0');
+                key = `${y}-${m}-01`;
+            }
+            if (!grouped[key]) grouped[key] = {count:0, savings:0, smart_cost:0, no_battery_cost:0, pure_grid_cost:0, pv_total:0, load_total:0};
+            grouped[key].count += 1;
+            grouped[key].savings += (r.savings || 0);
+            grouped[key].smart_cost += (r.smart_cost || 0);
+            grouped[key].no_battery_cost += (r.no_battery_cost || 0);
+            grouped[key].pure_grid_cost += (r.pure_grid_cost || 0);
+            grouped[key].pv_total += (r.pv_total || 0);
+            grouped[key].load_total += (r.load_total || 0);
+        }
+        return Object.keys(grouped).sort().map(k => ({ date: k, savings: grouped[k].savings, smart_cost: grouped[k].smart_cost, no_battery_cost: grouped[k].no_battery_cost, pure_grid_cost: grouped[k].pure_grid_cost, pv_total: grouped[k].pv_total, load_total: grouped[k].load_total }));
+    }
+
+    async function loadSavingsSeries() {
+        const agg = document.getElementById('aggSelect').value;
+        const costsCtx = document.getElementById('costsChart').getContext('2d');
+        const savingsCtx = document.getElementById('savingsChart').getContext('2d');
+        try {
+            const resp = await fetch(apiUrl('/api/savings-series'));
+            if (!resp.ok) throw new Error('Failed to load savings series');
+            const series = await resp.json();
+            const filteredSeries = filterSeriesByRange(series);
+
+            const used = aggregateSeries(filteredSeries, agg);
+
+            const labels = used.map(r => r.date);
+            const smartData = used.map(r => r.smart_cost || 0);
+            const noBatteryData = used.map(r => r.no_battery_cost || 0);
+            const pureGridData = used.map(r => r.pure_grid_cost || 0);
+
+            const savingsGridSmartData = used.map(r => (r.pure_grid_cost || 0) - (r.smart_cost || 0));
+            const savingsGridNoBatteryData = used.map(r => (r.pure_grid_cost || 0) - (r.no_battery_cost || 0));
+            const savingsNoBatterySmartData = used.map(r => (r.no_battery_cost || 0) - (r.smart_cost || 0));
+
+            const costDatasets = [
+                { label: 'Okos rendszer költség (HUF)', data: smartData, borderColor: '#7b3294', backgroundColor: 'rgba(123,50,148,0.06)', tension:0.2 },
+                { label: 'Akku nélküli költség (HUF)', data: noBatteryData, borderColor: '#f46d43', backgroundColor: 'rgba(244,109,67,0.06)', tension:0.2 },
+                { label: 'Csak hálózati költség (HUF)', data: pureGridData, borderColor: '#d62728', backgroundColor: 'rgba(214,39,40,0.06)', tension:0.2 }
+            ];
+
+            const savingsDatasets = [
+                { label: 'Csak hálózat - okos rendszer', data: savingsGridSmartData, borderColor: '#1f77b4', backgroundColor: 'rgba(31,119,180,0.08)', tension:0.2 },
+                { label: 'Csak hálózat - akkumulátor nélküli', data: savingsGridNoBatteryData, borderColor: '#2ca02c', backgroundColor: 'rgba(44,160,44,0.08)', tension:0.2 },
+                { label: 'Akkumulátor nélküli - okos rendszer', data: savingsNoBatterySmartData, borderColor: '#ff7f0e', backgroundColor: 'rgba(255,127,14,0.08)', tension:0.2 }
+            ];
+
+            if (costsChart) {
+                costsChart.data.labels = labels;
+                costsChart.data.datasets = costDatasets;
+                costsChart.update();
+            } else {
+                costsChart = new Chart(costsCtx, {
+                    type: 'line',
+                    data: { labels, datasets: costDatasets },
+                    options: {
+                        responsive: true,
+                        plugins: { legend: { position: 'top' } },
+                        interaction: { mode: 'index', intersect: false },
+                        scales: { x: { display: true }, y: { display: true } }
+                    }
+                });
+            }
+
+            if (savingsChart) {
+                savingsChart.data.labels = labels;
+                savingsChart.data.datasets = savingsDatasets;
+                savingsChart.update();
+            } else {
+                savingsChart = new Chart(savingsCtx, {
+                    type: 'line',
+                    data: { labels, datasets: savingsDatasets },
+                    options: {
+                        responsive: true,
+                        plugins: { legend: { position: 'top' } },
+                        interaction: { mode: 'index', intersect: false },
+                        scales: { x: { display: true }, y: { display: true } }
+                    }
+                });
+            }
+
+        } catch (err) {
+            console.error('Error loading savings series', err);
+        }
+    }
+
 </script>
 </body>
 </html>

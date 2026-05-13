@@ -119,24 +119,22 @@ def get_real_entsoe_prices(start_date_str=None, end_date_str=None):
         return prices_in_huf[:24]
 
     except Exception as e:
-        print(f"Hiba az API híváskor: {e}")
+        print(f"Hiba az ENTSO-E API híváskor: {e}")
         return [30] * 24
 
 def get_solar_forecast(target_date_str=None):
-    # 1. Rendszer paraméterek (Budapest)
+    # System parameters for Budapest.
     lat = 47.50
     lon = 19.04
     tilt = 35
-    # FIGYELEM: A pvlib-ben az Észak = 0, Kelet = 90, Dél = 180. 
-    # A korábbi API-nál a 0 jelentette a Délt, itt át kell írni 180-ra!
-    azimuth = 180 
+    # In pvlib, north is 0, east is 90, and south is 180.
+    azimuth = 180
     kwp = 5.0
 
     if target_date_str is None:
         target_date_str = pd.Timestamp.now(tz='Europe/Budapest').strftime('%Y-%m-%d')
 
-    # 2. Open-Meteo API lekérés az adott napra
-    # Lekérjük a hőmérsékletet, szelet, és a 3 legfontosabb sugárzási adatot (GHI, DNI, DHI)
+    # Fetch the Open-Meteo forecast for the selected day.
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={lat}&longitude={lon}&"
@@ -150,45 +148,39 @@ def get_solar_forecast(target_date_str=None):
         response.raise_for_status()
         data = response.json()
 
-        # 3. Adatok DataFrame-be rendezése a pvlib számára
+        # Arrange the weather data for pvlib.
         times = pd.to_datetime(data['hourly']['time']).tz_localize('Europe/Budapest')
         weather_df = pd.DataFrame({
-            'ghi': data['hourly']['shortwave_radiation'],          # Globális vízszintes besugárzás
-            'dni': data['hourly']['direct_normal_irradiance'],     # Direkt normál besugárzás
-            'dhi': data['hourly']['diffuse_radiation'],            # Diffúz besugárzás
+            'ghi': data['hourly']['shortwave_radiation'],
+            'dni': data['hourly']['direct_normal_irradiance'],
+            'dhi': data['hourly']['diffuse_radiation'],
             'temp_air': data['hourly']['temperature_2m'],
             'wind_speed': data['hourly']['wind_speed_10m']
         }, index=times)
 
-        # 4. PVLIB Rendszer és Helyszín definíció (PVWatts modell alapján)
+        # Define the pvlib system and location.
         site_location = Location(lat, lon, tz='Europe/Budapest')
         
         system = PVSystem(
             surface_tilt=tilt,
             surface_azimuth=azimuth,
-            # pdc0: DC kapacitás Wattban, gamma_pdc: hőmérsékleti együttható (%/°C)
             module_parameters={'pdc0': kwp * 1000, 'gamma_pdc': -0.004},
-            # Egyszerű inverter definíció 96%-os hatásfokkal
             inverter_parameters={'pdc0': kwp * 1000 * 1.1, 'eta_inv_nom': 0.96},
             temperature_model_parameters=TEMPERATURE_MODEL_PARAMETERS['sapm']['open_rack_glass_glass']
         )
-        
-        # Futtatókörnyezet (ModelChain) összeállítása
+
         mc = ModelChain(system, site_location, aoi_model='physical', spectral_model='no_loss')
 
-        # 5. Szimuláció futtatása az időjárási adatokon
         mc.run_model(weather_df)
 
-        # 6. Eredmények kinyerése (AC teljesítmény Wattból átváltva kW-ba)
+        # Convert AC power from watts to kilowatts.
         ac_power_kw = mc.results.ac / 1000.0
-        
-        # Éjszaka a pvlib minimális negatív értékeket (inverter fogyasztás) adhat, ezt nullázzuk
+
+        # pvlib can return small negative values at night; clamp them to zero.
         ac_power_kw = ac_power_kw.clip(lower=0)
 
-        # 24 órás listává alakítás
         daily_values = [round(float(val), 2) for val in ac_power_kw.values]
 
-        # Biztonsági ellenőrzés, ha valamiért nem 24 órát adna vissza az API
         if len(daily_values) < 24:
             daily_values.extend([0.0] * (24 - len(daily_values)))
 

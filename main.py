@@ -1,13 +1,9 @@
-import json
 import os
 import sqlite3
 from datetime import datetime, timedelta
-from functools import wraps
 
 import pandas as pd
-import requests
 from dotenv import load_dotenv
-from entsoe import EntsoePandasClient
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
@@ -20,8 +16,6 @@ app = Flask(__name__)
 CORS(app)
 
 API_KEY = os.environ.get("ENTSOE_API_KEY")
-COUNTRY_CODE = "10YHU-MAVIR----U"
-DEFAULT_HUF_RATE = 410.0
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
@@ -37,7 +31,7 @@ def get_requested_dates():
 
 
 def load_stored_data(date_str):
-    """Load cached battery monitoring result for a given date from SQLite database."""
+    """Load a cached battery monitoring result for a given date from SQLite."""
     db_path = os.path.join(DATA_DIR, "energy_data.db")
     if not os.path.exists(db_path):
         return None
@@ -118,7 +112,7 @@ def load_stored_data(date_str):
 
 
 def list_available_dates():
-    """Return list of dates that have stored data in SQLite database."""
+    """Return the dates that have stored data in SQLite."""
     db_path = os.path.join(DATA_DIR, "energy_data.db")
     if not os.path.exists(db_path):
         return []
@@ -178,8 +172,71 @@ def get_battery_monitor():
 
 @app.route('/api/available-dates')
 def get_available_dates():
-    """Return list of dates that have stored data."""
     return jsonify(list_available_dates())
+
+
+@app.route('/api/savings-series')
+def get_savings_series():
+    """Return savings and related daily metrics from the database.
+
+    Optional query params:
+      - start: inclusive start date (YYYY-MM-DD)
+      - end: inclusive end date (YYYY-MM-DD)
+    If omitted, returns the full history ordered by date ascending.
+    """
+    db_path = os.path.join(DATA_DIR, "energy_data.db")
+    if not os.path.exists(db_path):
+        return jsonify([])
+
+    start = request.args.get('start')
+    end = request.args.get('end')
+
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            sql = (
+                "SELECT date, savings, smart_cost, no_battery_cost, pv_total, load_total"
+                " FROM daily_stats"
+            )
+            params = []
+            if start and end:
+                sql += " WHERE date >= ? AND date <= ?"
+                params = [start, end]
+            elif start:
+                sql += " WHERE date >= ?"
+                params = [start]
+            elif end:
+                sql += " WHERE date <= ?"
+                params = [end]
+
+            sql += " ORDER BY date ASC"
+
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+
+            series = []
+            for r in rows:
+                date_str = r['date']
+                cursor.execute("SELECT price, load FROM hourly_data WHERE date = ? ORDER BY hour ASC", (date_str,))
+                hourly_rows = cursor.fetchall()
+                pure_grid_cost = sum(h['load'] * h['price'] for h in hourly_rows) if hourly_rows else None
+                
+                series.append({
+                    'date': r['date'],
+                    'savings': float(r['savings']) if r['savings'] is not None else None,
+                    'smart_cost': float(r['smart_cost']) if r['smart_cost'] is not None else None,
+                    'no_battery_cost': float(r['no_battery_cost']) if r['no_battery_cost'] is not None else None,
+                    'pure_grid_cost': float(pure_grid_cost) if pure_grid_cost is not None else None,
+                    'pv_total': float(r['pv_total']) if r['pv_total'] is not None else None,
+                    'load_total': float(r['load_total']) if r['load_total'] is not None else None,
+                })
+
+            return jsonify(series)
+    except Exception as e:
+        print(f"Error reading savings series from DB: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 if __name__ == '__main__':
