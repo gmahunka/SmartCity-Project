@@ -1,3 +1,10 @@
+"""Battery optimization workflow for day-ahead SmartCity scheduling.
+
+This module orchestrates data retrieval (prices, PV forecast, load profile),
+formulates a 24-hour linear optimization problem with PuLP, and returns both
+hourly trajectories and aggregate economic metrics.
+"""
+
 import pulp
 import pandas as pd
 from datetime import datetime
@@ -13,7 +20,14 @@ except ImportError:
 
 
 def get_last_soc_from_previous_day(start_date_str):
-    """Fetch the last SOC from the previous day."""
+    """Fetch the previous day's closing SOC from SQLite for continuity.
+
+    Args:
+        start_date_str: Target day in YYYY-MM-DD format.
+
+    Returns:
+        Float SOC value if available; otherwise None.
+    """
     try:
         import sqlite3
         prev_date = datetime.strptime(start_date_str, '%Y-%m-%d') - timedelta(days=1)
@@ -33,7 +47,16 @@ def get_last_soc_from_previous_day(start_date_str):
     return None
 
 def get_load_profile_for_date(target_date_str):
-    """Load the consumption profile for the requested day from CSV."""
+    """Load the hourly consumption profile for a given date.
+
+    The CSV stores one row per weekday with 24 hourly values.
+
+    Args:
+        target_date_str: Target day in YYYY-MM-DD format.
+
+    Returns:
+        List of 24 floats in kW. Falls back to a built-in profile on errors.
+    """
     try:
         csv_path = Path(__file__).parent.parent / "data" / "load_profiles.csv"
 
@@ -57,6 +80,18 @@ def get_load_profile_for_date(target_date_str):
 
 
 def run_battery_monitoring(start_date_str=None, end_date_str=None):
+    """Run a 24-hour battery dispatch optimization for one delivery day.
+
+    Args:
+        start_date_str: Inclusive start date (YYYY-MM-DD). Defaults to today.
+        end_date_str: Exclusive end date (YYYY-MM-DD). Defaults to next day.
+
+    Returns:
+        Dict containing solver status, summary stats, hourly signals, and
+        a base64 plot image for API/UI consumption.
+    """
+    # Normalize and validate date boundaries so optimization always covers
+    # exactly one delivery day [start, end).
     if start_date_str is None:
         start_date_str = datetime.now().strftime('%Y-%m-%d')
 
@@ -80,9 +115,14 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
         end_date = start_date + timedelta(days=1)
         end_date_str = end_date.strftime('%Y-%m-%d')
 
+    # Grid access fee (HUF/kWh) added to buy-side market price.
     RHD_DIJ = 25
 
+    # Time index for one day at hourly granularity.
     T = range(24)
+
+    # Fetch market and exchange-rate inputs, then build asymmetric buy/sell
+    # tariffs used by the optimizer.
     prices = get_real_entsoe_prices(start_date_str, end_date_str)
     prices_buy = [p + RHD_DIJ for p in prices]
     prices_sell = [p * 0.9 for p in prices_buy]
@@ -98,9 +138,11 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
     except Exception:
         pass
 
+    # Exogenous energy flows: PV generation forecast and expected load.
     pv_gen = get_solar_forecast(start_date_str)
     load = get_load_profile_for_date(start_date_str)
     
+    # Build linear program minimizing operating cost with a terminal SOC value.
     model = pulp.LpProblem("Energy_Optimization", pulp.LpMinimize)
 
     p_chg = pulp.LpVariable.dicts("P_chg", T, lowBound=0, upBound=5)
@@ -109,22 +151,29 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
     p_grid_sell = pulp.LpVariable.dicts("P_sell", T, lowBound=0)
     soc = pulp.LpVariable.dicts("SOC", T, lowBound=2, upBound=10)
 
+    # Simple battery model: constant charge/discharge efficiency.
     eff = 0.95
+
+    # Use previous day SOC for smoother inter-day operation.
     initial_soc = get_last_soc_from_previous_day(start_date_str)
     if initial_soc is None:
         initial_soc = 5
         print("No previous SOC found, defaulting to 5")
 
+    # Throughput penalty approximates degradation cost.
     c_deg = 1
 
+    # Terminal SOC valuation discourages ending day with an empty battery.
     future_value_estimate = (sum(prices_buy) / len(prices_buy))
 
+    # Objective: import cost - export revenue + degradation - terminal value.
     model += pulp.lpSum([
         p_grid_buy[t] * prices_buy[t] -
         p_grid_sell[t] * prices_sell[t] +
         (p_chg[t] + p_dis[t]) * c_deg
         for t in T] - (soc[23] * future_value_estimate))
 
+    # Enforce per-hour energy balance and SOC state transition.
     for t in T:
         model += (pv_gen[t] + p_dis[t] + p_grid_buy[t] == load[t] + p_chg[t] + p_grid_sell[t])
         if t == 0:
@@ -132,14 +181,19 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
         else:
             model += soc[t] == soc[t - 1] + (p_chg[t] * eff) - (p_dis[t] / eff)
 
+    # Solve with CBC quietly for API/background use.
     model.solve(pulp.PULP_CBC_CMD(msg=0))
 
+    # Extract optimized hourly trajectories into JSON-friendly lists.
     soc_list = [float(soc[t].varValue or 0.0) for t in T]
     battery_list = [float((p_chg[t].varValue or 0.0) - (p_dis[t].varValue or 0.0)) for t in T]
     grid_list = [float((p_grid_buy[t].varValue or 0.0) - (p_grid_sell[t].varValue or 0.0)) for t in T]
 
+    # Recover realized smart-system cost by removing terminal SOC valuation.
     total_cost_with_smart_system = float((pulp.value(model.objective) + (pulp.value(soc[23]) * future_value_estimate)) or 0.0)
     cost_without_battery = 0.0
+
+    # Baseline #1: site with PV but without battery dispatch.
     for t in T:
         net_flow = load[t] - pv_gen[t]
         if net_flow > 0:
@@ -148,10 +202,13 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
             cost_without_battery += net_flow * (prices[t] * 0.9)
 
     saving = cost_without_battery - total_cost_with_smart_system
+
+    # Baseline #2: all load purchased from grid without local PV/battery effects.
     pure_grid_cost = sum(load[t] * (prices_buy[t]) for t in T)
     total_saving_vs_grid = pure_grid_cost - total_cost_with_smart_system
 
 
+    # Render summary chart once so API/UI can display without local plotting.
     plot_b64 = plot_results_base64(T, prices_buy, pv_gen, load, soc_list, battery_list, grid_list)
     hourly = [
         {
@@ -187,6 +244,7 @@ def run_battery_monitoring(start_date_str=None, end_date_str=None):
 
 
 if __name__ == '__main__':
+    # Local debug entry point: run one optimization and display the plot.
     result = run_battery_monitoring()
 
     T = range(24)

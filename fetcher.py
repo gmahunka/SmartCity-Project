@@ -18,13 +18,20 @@ DB_PATH = DATA_DIR / "energy_data.db"
 
 def save_to_database(result_dict):
     """
-    Save the battery monitoring result to SQLite.
-    The schema is created on demand and writes are committed atomically.
+    Save one optimization result payload into SQLite tables.
+
+    The function ensures schema availability (`daily_stats`, `hourly_data`),
+    writes summary and hourly records with upsert semantics, and commits as a
+    single transaction to avoid partial-day persistence.
+
+    Args:
+        result_dict: Dict returned by run_battery_monitoring.
     """
     DATA_DIR.mkdir(exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     cursor = conn.cursor()
 
+    # Daily aggregates table: one row per delivery date.
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS daily_stats (
             date TEXT UNIQUE,
@@ -37,6 +44,7 @@ def save_to_database(result_dict):
         )
     ''')
     
+    # Hourly time series table: one row per (date, hour).
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS hourly_data (
             date TEXT,
@@ -51,6 +59,7 @@ def save_to_database(result_dict):
         )
     ''')
     
+    # Index speeds up per-day chart/history queries.
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_hourly_date ON hourly_data(date)
     ''')
@@ -60,6 +69,7 @@ def save_to_database(result_dict):
     hourly = result_dict['hourly']
 
     try:
+        # Upsert daily summary metrics.
         cursor.execute('''
             INSERT OR REPLACE INTO daily_stats 
             (date, smart_cost, no_battery_cost, savings, pv_total, load_total, rate)
@@ -74,6 +84,7 @@ def save_to_database(result_dict):
             stats.get('eur_huf_rate')
         ))
         
+        # Prepare bulk hourly upsert for better write efficiency.
         hourly_records = []
         for h in hourly:
             hourly_records.append((
@@ -93,6 +104,7 @@ def save_to_database(result_dict):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', hourly_records)
 
+        # Commit only after both summary and hourly inserts succeed.
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -102,6 +114,15 @@ def save_to_database(result_dict):
 
 
 def fetch_and_save(target_date_str=None):
+    """Run optimization for a target day and persist result to SQLite.
+
+    Args:
+        target_date_str: Date in YYYY-MM-DD. Defaults to tomorrow.
+
+    Returns:
+        Result dict (without plot image payload) after successful persistence.
+    """
+    # Daily batch job defaults to next day to precompute tomorrow's schedule.
     if target_date_str is None:
         target_date_str = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
 
@@ -116,7 +137,7 @@ def fetch_and_save(target_date_str=None):
         print(f"Battery monitoring failed: {e}")
         raise
 
-    # Cleanup: Ignore plot_image_base64 field to save db space
+    # Drop large image blob before storing to keep DB lean.
     if 'plot_image_base64' in result:
         del result['plot_image_base64']
 

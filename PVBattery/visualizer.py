@@ -1,3 +1,9 @@
+"""Plotting utilities for SmartCity battery optimization outputs.
+
+The module renders a two-panel daily chart and supports both interactive
+display and base64 image serialization for API responses.
+"""
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -6,14 +12,21 @@ import io
 
 
 def create_plot_figure(T, prices, pv_gen, load, soc_values, battery_move, grid_values):
+    """Create a two-panel matplotlib figure for daily system behavior.
+
+    The top panel overlays price and SOC on dual y-axes. The bottom panel shows
+    PV, load, battery power flow, and net grid exchange.
+    """
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
 
+    # Panel 1 (left axis): market prices.
     color = 'tab:red'
     ax1.set_ylabel('Ár (Ft/kWh)', color=color)
     ax1.plot(T, prices, color=color, marker='o', label='Piaci ár')
     ax1.tick_params(axis='y', labelcolor=color)
     ax1.grid(True, alpha=0.3)
 
+    # Panel 1 (right axis): battery state of charge trajectory.
     ax1_2 = ax1.twinx()
     color = 'tab:blue'
     ax1_2.set_ylabel('Akku töltöttség (SOC - kWh)', color=color)
@@ -23,6 +36,7 @@ def create_plot_figure(T, prices, pv_gen, load, soc_values, battery_move, grid_v
     ax1_2.tick_params(axis='y', labelcolor=color)
     ax1.set_title('Áramár és Akkumulátor állapota')
 
+    # Panel 2: physical power flows and signed grid import/export.
     ax2.plot(T, pv_gen, color='gold', label='PV termelés (kW)', linewidth=2, alpha=0.8)
     ax2.plot(T, load, color='black', linestyle='--', label='Fogyasztás (kW)', alpha=0.7)
     ax2.bar(T, battery_move, color='green', alpha=0.4, label='Akku töltés/kisütés (kW)')
@@ -41,6 +55,7 @@ def create_plot_figure(T, prices, pv_gen, load, soc_values, battery_move, grid_v
 
 
 def plot_results_base64(T, prices, pv_gen, load, soc_values, battery_move, grid_values):
+    """Render the optimization chart to PNG and return a base64 string."""
     fig = create_plot_figure(T, prices, pv_gen, load, soc_values, battery_move, grid_values)
     buffer = io.BytesIO()
     fig.savefig(buffer, format='png', dpi=120, bbox_inches='tight')
@@ -49,6 +64,7 @@ def plot_results_base64(T, prices, pv_gen, load, soc_values, battery_move, grid_
     return base64.b64encode(buffer.read()).decode('utf-8')
 
 def plot_results(T, prices, pv_gen, load, soc_values, battery_move, grid_values):
+    """Display the optimization chart in an interactive matplotlib window."""
     fig = create_plot_figure(T, prices, pv_gen, load, soc_values, battery_move, grid_values)
     plt.show()
     plt.close(fig)

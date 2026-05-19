@@ -1,3 +1,10 @@
+"""External data acquisition for pricing, FX conversion, and PV forecasting.
+
+This module fetches ENTSO-E day-ahead prices, EUR/HUF conversion rates, and
+weather-based PV output forecasts. Each public function provides conservative
+fallback values so the optimization can still run when upstream APIs fail.
+"""
+
 import os
 import time
 import requests
@@ -18,6 +25,10 @@ FRANKFURTER_LATEST_URL = "https://api.frankfurter.dev/v1/latest?from=EUR&to=HUF"
 
 
 def _extract_frankfurter_payload(data):
+    """Normalize Frankfurter responses into a dictionary payload.
+
+    Some API gateways may wrap the expected object in a one-item list.
+    """
     if isinstance(data, dict):
         return data
 
@@ -30,6 +41,13 @@ def _extract_frankfurter_payload(data):
 
 
 def get_eur_huf_rates():
+    """Fetch EUR/HUF exchange rate with short retry/backoff strategy.
+
+    Returns:
+        pandas.Series indexed by date string with one HUF rate value.
+        Returns an empty Series on repeated failures.
+    """
+    # Retry quickly to tolerate transient network/API glitches.
     retry_delays = [0, 1, 2]
     last_error = None
 
@@ -63,6 +81,16 @@ def get_eur_huf_rates():
 
 
 def get_real_entsoe_prices(start_date_str=None, end_date_str=None):
+    """Fetch and convert ENTSO-E day-ahead prices to HUF/kWh.
+
+    Args:
+        start_date_str: Inclusive start date (YYYY-MM-DD).
+        end_date_str: Exclusive end date (YYYY-MM-DD).
+
+    Returns:
+        List of 24 hourly prices in HUF/kWh. Returns fallback values if the
+        upstream calls fail.
+    """
     client = EntsoePandasClient(api_key=API_TOKEN)
 
     if start_date_str is None:
@@ -81,6 +109,7 @@ def get_real_entsoe_prices(start_date_str=None, end_date_str=None):
             end_date_str = end.strftime('%Y-%m-%d')
 
     try:
+        # Query market prices in local timezone and normalize to hourly steps.
         prices_series = client.query_day_ahead_prices(COUNTRY_CODE, start=start, end=end)
         if prices_series.empty:
             return [30] * 24
@@ -89,10 +118,12 @@ def get_real_entsoe_prices(start_date_str=None, end_date_str=None):
 
         prices_series = prices_series.resample('h').mean()
 
+        # Keep only the first 24 points to guarantee one-day output size.
         prices_series = prices_series.iloc[:24]
 
         df = pd.DataFrame(prices_series, columns=['EUR_MWh'])
 
+        # Build a complete daily FX series and fill gaps for stable conversion.
         rates_series = get_eur_huf_rates()
         rates_series.index = pd.to_datetime(rates_series.index)
         full_dates = pd.date_range(start=start_date_str, end=end_date_str, freq='D')
@@ -108,12 +139,14 @@ def get_real_entsoe_prices(start_date_str=None, end_date_str=None):
             rates_df = rates_df.reindex(full_dates)
             rates_df['HUF'] = rates_df['HUF'].fillna(410.0)
 
+        # Convert market units from EUR/MWh to HUF/kWh.
         df['date'] = df.index.tz_convert('Europe/Budapest').normalize().tz_localize(None)
         df['HUF_rate'] = df['date'].map(rates_df['HUF'])
         df['HUF_kWh'] = (df['EUR_MWh'] * df['HUF_rate']) / 1000
 
         prices_in_huf = [round(price, 2) for price in df['HUF_kWh'].values]
 
+        # Pad if source data has fewer than 24 points (DST/API edge cases).
         if len(prices_in_huf) < 24:
             prices_in_huf.extend([prices_in_huf[-1] if prices_in_huf else 30] * (24 - len(prices_in_huf)))
         return prices_in_huf[:24]
@@ -123,6 +156,14 @@ def get_real_entsoe_prices(start_date_str=None, end_date_str=None):
         return [30] * 24
 
 def get_solar_forecast(target_date_str=None):
+    """Estimate hourly AC PV production for Budapest using Open-Meteo + pvlib.
+
+    Args:
+        target_date_str: Target date (YYYY-MM-DD). Defaults to local today.
+
+    Returns:
+        List of 24 hourly PV power values in kW.
+    """
     # System parameters for Budapest.
     lat = 47.50
     lon = 19.04
@@ -148,7 +189,7 @@ def get_solar_forecast(target_date_str=None):
         response.raise_for_status()
         data = response.json()
 
-        # Arrange the weather data for pvlib.
+        # Re-map API weather fields into the dataframe format expected by pvlib.
         times = pd.to_datetime(data['hourly']['time']).tz_localize('Europe/Budapest')
         weather_df = pd.DataFrame({
             'ghi': data['hourly']['shortwave_radiation'],
@@ -158,7 +199,7 @@ def get_solar_forecast(target_date_str=None):
             'wind_speed': data['hourly']['wind_speed_10m']
         }, index=times)
 
-        # Define the pvlib system and location.
+        # Configure physical site and PV system assumptions.
         site_location = Location(lat, lon, tz='Europe/Budapest')
         
         system = PVSystem(
@@ -171,6 +212,7 @@ def get_solar_forecast(target_date_str=None):
 
         mc = ModelChain(system, site_location, aoi_model='physical', spectral_model='no_loss')
 
+        # Run irradiance-to-AC simulation pipeline.
         mc.run_model(weather_df)
 
         # Convert AC power from watts to kilowatts.

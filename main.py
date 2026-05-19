@@ -1,3 +1,9 @@
+"""Flask API for cached and live SmartCity battery monitoring results.
+
+The server serves dashboard data from SQLite when available and optionally
+falls back to live recomputation via the optimization pipeline.
+"""
+
 import os
 import sqlite3
 from datetime import datetime, timedelta
@@ -23,6 +29,7 @@ if not API_KEY:
     raise RuntimeError("ENTSOE_API_KEY environment variable is required")
 
 def get_requested_dates():
+    """Read start/end date query params with sensible one-day defaults."""
     today = datetime.now().date()
     tomorrow = today + pd.Timedelta(days=1)
     start_str = request.args.get('start', today.strftime('%Y-%m-%d'))
@@ -31,7 +38,11 @@ def get_requested_dates():
 
 
 def load_stored_data(date_str):
-    """Load a cached battery monitoring result for a given date from SQLite."""
+    """Load a full cached monitoring payload for one date from SQLite.
+
+    Reconstructs both hourly series and summary statistics so the response
+    shape matches live optimization output.
+    """
     db_path = os.path.join(DATA_DIR, "energy_data.db")
     if not os.path.exists(db_path):
         return None
@@ -46,6 +57,7 @@ def load_stored_data(date_str):
             if not daily_row:
                 return None
             
+            # Require complete hourly coverage to keep charting and metrics valid.
             cursor.execute("SELECT * FROM hourly_data WHERE date = ? ORDER BY hour ASC", (date_str,))
             hourly_rows = cursor.fetchall()
             
@@ -61,6 +73,7 @@ def load_stored_data(date_str):
             battery = []
             grid = []
             
+            # Rebuild API-compatible hourly objects and parallel arrays.
             for r in hourly_rows:
                 hourly.append({
                     'hour': r['hour'],
@@ -78,6 +91,7 @@ def load_stored_data(date_str):
                 battery.append(r['battery'])
                 grid.append(r['grid'])
                 
+            # Derive comparable baseline metrics from stored hourly values.
             pure_grid_cost = sum(load[t] * prices[t] for t in T)
             avg_price = sum(prices) / len(prices) if prices else 0.0
             
@@ -95,6 +109,7 @@ def load_stored_data(date_str):
 
             plot_b64 = plot_results_base64(T, prices, pv, load, soc_values, battery, grid)
             
+            # End date follows exclusive boundary convention used by live runs.
             end_date_str = (datetime.strptime(date_str, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
             
             return {
@@ -129,29 +144,32 @@ def list_available_dates():
 
 
 def is_live_call_allowed():
+    """Parse allow_live query flag using common truthy string variants."""
     allow_live = request.args.get('allow_live', 'false').strip().lower()
     return allow_live in {'1', 'true', 'yes', 'on'}
 
 
 @app.route('/')
 def index():
+    """Serve the dashboard frontend."""
     return send_file('index.html')
 
 @app.route('/api/battery-monitor')
 def get_battery_monitor():
+    """Return cached monitoring data or live recomputation for one day."""
     start_str, end_str = get_requested_dates()
 
     force_refresh = request.args.get('force_refresh', 'false').strip().lower() in {'1', 'true', 'yes', 'on'}
     allow_live = is_live_call_allowed()
 
+    # Prefer cache for speed/reliability unless explicit refresh is requested.
     if not force_refresh:
         stored = load_stored_data(start_str)
         if stored:
             stored["source"] = "cached"
             return jsonify(stored)
     
-
-
+    # When live calls are disallowed and cache miss occurs, fail with 404.
     if not allow_live:
         return jsonify({
             "error": "No cached data available for the selected date.",
@@ -159,6 +177,7 @@ def get_battery_monitor():
         }), 404
 
     try:
+        # Execute fresh optimization; keep source metadata explicit for clients.
         result = run_battery_monitoring(start_str, end_str)
         if force_refresh:
             result["source"] = "live_recomputed_unsaved"
@@ -172,6 +191,7 @@ def get_battery_monitor():
 
 @app.route('/api/available-dates')
 def get_available_dates():
+    """Return all cached dates in ascending order."""
     return jsonify(list_available_dates())
 
 
@@ -196,6 +216,7 @@ def get_savings_series():
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
+            # Build optional date-range SQL dynamically from query params.
             sql = (
                 "SELECT date, savings, smart_cost, no_battery_cost, pv_total, load_total"
                 " FROM daily_stats"
@@ -219,6 +240,9 @@ def get_savings_series():
             series = []
             for r in rows:
                 date_str = r['date']
+
+                # Recompute pure grid cost from hourly rows for apples-to-apples
+                # comparison against stored smart/no-battery totals.
                 cursor.execute("SELECT price, load FROM hourly_data WHERE date = ? ORDER BY hour ASC", (date_str,))
                 hourly_rows = cursor.fetchall()
                 pure_grid_cost = sum(h['load'] * h['price'] for h in hourly_rows) if hourly_rows else None
@@ -240,4 +264,5 @@ def get_savings_series():
 
 
 if __name__ == '__main__':
+    # Local development entry point.
     app.run(debug=True, port=5000)
