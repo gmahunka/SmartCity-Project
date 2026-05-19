@@ -4,11 +4,14 @@ This small but powerful project demonstrates how local photovoltaic (PV) generat
 
 Under the hood, the `PVBattery` module fetches electricity price time series, weather forecasts and PV production estimates, then formulates a linear optimisation problem to dispatch the battery for minimum cost while respecting state-of-charge (SOC) and power constraints. The backend exposes a minimal Flask API used by the frontend dashboard (`index.html`) to visualise hourly results, historical savings and per-day comparisons.
 
+An additional automation layer runs through GitHub Actions. The scheduled workflow collects and refreshes data in the background, so the project can keep historical results up to date without manual intervention. That makes the repository useful not only as a demo webapp, but also as a reproducible data pipeline for energy monitoring and comparison.
+
 Key features:
 
 - Day-ahead optimisation using market prices and PV forecasts
 - Multiple example load profiles (see `data/load_profiles.csv`)
 - Simple SQLite caching to store daily and hourly results
+- GitHub Actions workflow for automated data collection and refreshes
 - Interactive dashboard for daily and aggregated comparisons
 
 Below are two screenshots demonstrating the webapp views.
